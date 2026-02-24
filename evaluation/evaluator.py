@@ -16,6 +16,8 @@ def save_jsonl(records: Iterable[Dict], path: Path) -> None:
 
 
 def build_summary_row(summary: Dict, run_name: str, checker: str, strategy: str) -> Dict:
+    checker_norm = str(checker).strip().lower()
+    has_checker = checker_norm not in {"", "none", "없음"}
     return {
         "실험명": run_name,
         "체커": checker,
@@ -27,6 +29,9 @@ def build_summary_row(summary: Dict, run_name: str, checker: str, strategy: str)
         "커버리지": float(summary.get("coverage", 0.0)),
         "선택적정확도": float(summary.get("selective_accuracy", 0.0)),
         "평균지연(ms)": float(summary.get("latency_ms", 0.0)),
+        "체커판정수": int(summary.get("checker_eval_count", 0)) if has_checker else "",
+        "체커파싱실패수": int(summary.get("checker_parse_fail_count", 0)) if has_checker else "",
+        "체커파싱성공률": float(summary.get("checker_parse_success_rate", 0.0)) if has_checker else "",
     }
 
 
@@ -70,6 +75,9 @@ def save_summary_csv(rows: List[Dict], path: Path) -> None:
         "커버리지",
         "선택적정확도",
         "평균지연(ms)",
+        "체커판정수",
+        "체커파싱실패수",
+        "체커파싱성공률",
         "EM_차이",
         "EM_p값",
         "F1_차이",
@@ -97,6 +105,8 @@ def make_markdown_table(rows: List[Dict]) -> str:
         "커버리지",
         "선택적정확도",
         "평균지연(ms)",
+        "체커파싱성공률",
+        "체커파싱실패수",
         "EM_p값",
         "F1_p값",
     ]
@@ -116,6 +126,8 @@ def make_markdown_table(rows: List[Dict]) -> str:
                     f"{float(row.get('커버리지', 0.0)):.4f}",
                     f"{float(row.get('선택적정확도', 0.0)):.4f}",
                     f"{float(row.get('평균지연(ms)', 0.0)):.1f}",
+                    _fmt_ratio(row.get("체커파싱성공률", "")),
+                    _fmt_int(row.get("체커파싱실패수", "")),
                     _fmt_p(row.get("EM_p값", "")),
                     _fmt_p(row.get("F1_p값", "")),
                 ]
@@ -141,5 +153,23 @@ def _fmt_p(value) -> str:
         return "-"
     try:
         return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_ratio(value) -> str:
+    if value == "":
+        return "-"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_int(value) -> str:
+    if value == "":
+        return "-"
+    try:
+        return str(int(value))
     except (TypeError, ValueError):
         return str(value)

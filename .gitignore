@@ -47,3 +47,4 @@ outputs/*
 
 # Local caches
 .cache/
+.hf_cache/

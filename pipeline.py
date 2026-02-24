@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import random
 import time
 from pathlib import Path
@@ -40,23 +41,69 @@ def set_global_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def configure_hf_cache(run_cfg: Dict) -> Dict[str, str]:
+    """
+    HuggingFace 캐시 경로를 로컬 워크스페이스 하위로 고정한다.
+    권한 문제로 ~/.cache 잠금 파일 생성이 실패하는 경우를 방지한다.
+    """
+    cache_root_raw = str(run_cfg.get("hf_cache_dir", ".hf_cache")).strip()
+    cache_root = Path(cache_root_raw).expanduser()
+    if not cache_root.is_absolute():
+        cache_root = Path.cwd() / cache_root
+
+    datasets_cache = cache_root / "datasets"
+    transformers_cache = cache_root / "transformers"
+    datasets_cache.mkdir(parents=True, exist_ok=True)
+    transformers_cache.mkdir(parents=True, exist_ok=True)
+
+    os.environ["HF_HOME"] = str(cache_root)
+    os.environ["HF_DATASETS_CACHE"] = str(datasets_cache)
+    os.environ["TRANSFORMERS_CACHE"] = str(transformers_cache)
+
+    return {
+        "hf_home": str(cache_root),
+        "hf_datasets_cache": str(datasets_cache),
+        "hf_transformers_cache": str(transformers_cache),
+    }
+
+
 def probe_mps_status() -> Dict[str, str | bool]:
     """현재 파이썬 환경에서 MPS 사용 가능 여부를 점검한다."""
+    macos_version = str(platform.mac_ver()[0] or "").strip()
     built = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built())
     available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
     error = ""
+    hint = ""
 
     if built and not available:
         try:
             _ = torch.ones(1, device="mps")
         except Exception as exc:  # pragma: no cover
             error = str(exc)
+        if macos_version:
+            try:
+                major = int(macos_version.split(".")[0])
+            except ValueError:
+                major = 0
+            if major >= 13:
+                if "dev" in str(torch.__version__).lower():
+                    hint = (
+                        "개발 버전(PyTorch nightly)에서 MPS 감지 이슈가 있을 수 있습니다. "
+                        "안정 버전(torch/torchvision/torchaudio 동일 라인) 재설치를 권장합니다."
+                    )
+                else:
+                    hint = (
+                        "MPS 미활성은 macOS/파이썬/torch 조합 문제일 수 있습니다. "
+                        "Python 3.11~3.12 기반 새 환경에서 torch 안정 버전 재설치를 권장합니다."
+                    )
 
     return {
         "torch_version": str(torch.__version__),
+        "macos_version": macos_version,
         "mps_built": built,
         "mps_available": available,
         "probe_error": error,
+        "diagnosis_hint": hint,
     }
 
 
@@ -76,9 +123,11 @@ def load_hotpot_examples(config: Dict) -> List[Dict]:
     split = str(dataset_cfg.get("split", "validation"))
     max_questions = int(dataset_cfg.get("max_questions", 500))
     seed = int(run_cfg.get("seed", 42))
+    cache_paths = configure_hf_cache(run_cfg)
 
     print(f"[데이터] {hf_name}/{hf_conf} {split} split 로딩 중...")
-    ds = load_dataset(hf_name, hf_conf, split=split)
+    print(f"[캐시] HF 데이터 캐시: {cache_paths['hf_datasets_cache']}")
+    ds = load_dataset(hf_name, hf_conf, split=split, cache_dir=cache_paths["hf_datasets_cache"])
 
     if 0 < max_questions < len(ds):
         ds = ds.shuffle(seed=seed).select(range(max_questions))
@@ -121,12 +170,15 @@ class RAGPipeline:
         if "mps" in [str(x).lower().strip() for x in self.device_preference]:
             print(
                 f"[장치 점검] torch={mps_status['torch_version']} | "
+                f"macOS={mps_status['macos_version'] or 'unknown'} | "
                 f"mps_built={mps_status['mps_built']} | mps_available={mps_status['mps_available']}"
             )
             if not mps_status["mps_available"]:
                 print("[경고] 현재 환경에서 MPS(GPU)를 사용할 수 없어 CPU로 폴백합니다.")
                 if mps_status["probe_error"]:
                     print(f"[경고] MPS 점검 오류: {mps_status['probe_error']}")
+                if mps_status["diagnosis_hint"]:
+                    print(f"[경고] 진단 힌트: {mps_status['diagnosis_hint']}")
                 if self.force_mps:
                     raise RuntimeError(
                         "run.force_mps=true 이지만 MPS 사용이 불가능합니다. "
@@ -209,7 +261,7 @@ class RAGPipeline:
             checker = KeywordCoverageChecker(
                 min_keyword_hits=int(checker_overrides.get("min_keyword_hits", heur_cfg.get("min_keyword_hits", 2))),
                 min_coverage_ratio=float(
-                    checker_overrides.get("min_coverage_ratio", heur_cfg.get("min_coverage_ratio", 0.35))
+                    checker_overrides.get("min_coverage_ratio", heur_cfg.get("min_coverage_ratio", 0.5))
                 ),
             )
 
@@ -217,7 +269,9 @@ class RAGPipeline:
             auto_cfg = self.config.get("autorater", {})
             if not bool(auto_cfg.get("enabled", True)):
                 raise ValueError("autorater.enabled=false 상태입니다. 설정을 true로 바꾸거나 checker를 변경하세요.")
-            model_name = str(checker_overrides.get("model_name", auto_cfg.get("model_name", "google/flan-t5-base")))
+            model_name = str(
+                checker_overrides.get("model_name", auto_cfg.get("model_name", "Qwen/Qwen2.5-0.5B-Instruct"))
+            )
 
             if model_name == self.generator.model_name:
                 backend = self.generator
@@ -245,13 +299,15 @@ class RAGPipeline:
                 do_sample=bool(checker_overrides.get("do_sample", auto_cfg.get("do_sample", False))),
                 parse_fail_policy=str(auto_cfg.get("parse_fail_policy", "insufficient")),
                 confidence_threshold=float(checker_overrides.get("confidence_threshold", 0.0)),
+                max_parse_retries=int(checker_overrides.get("max_parse_retries", auto_cfg.get("max_parse_retries", 1))),
+                max_context_chars=int(checker_overrides.get("max_context_chars", auto_cfg.get("max_context_chars", 1800))),
             )
 
         elif checker_name == "self_consistency":
             sc_cfg = suff_cfg.get("self_consistency", {})
             checker = SelfConsistencyChecker(
                 generator=self.generator,
-                n_samples=int(checker_overrides.get("n_samples", sc_cfg.get("n_samples", 5))),
+                n_samples=int(checker_overrides.get("n_samples", sc_cfg.get("n_samples", 3))),
                 temperature=float(checker_overrides.get("temperature", sc_cfg.get("temperature", 0.7))),
                 disagreement_threshold=float(
                     checker_overrides.get("disagreement_threshold", sc_cfg.get("disagreement_threshold", 0.6))
@@ -434,6 +490,13 @@ class RAGPipeline:
             strategy=strategy_mode,
             abstain_text=self.abstain_text,
         )
+        if checker_name is not None:
+            print(
+                "[체커 진단] "
+                f"판정수={row.get('체커판정수', '-')}, "
+                f"파싱실패수={row.get('체커파싱실패수', '-')}, "
+                f"파싱성공률={row.get('체커파싱성공률', '-')}"
+            )
 
         if baseline_records is not None:
             boot_cfg = self.config.get("evaluation", {}).get("bootstrap", {})

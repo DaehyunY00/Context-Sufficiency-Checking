@@ -47,7 +47,7 @@ class KeywordCoverageChecker(BaseChecker):
 
     name = "heuristic"
 
-    def __init__(self, min_keyword_hits: int = 2, min_coverage_ratio: float = 0.35) -> None:
+    def __init__(self, min_keyword_hits: int = 2, min_coverage_ratio: float = 0.5) -> None:
         self.min_keyword_hits = int(min_keyword_hits)
         self.min_coverage_ratio = float(min_coverage_ratio)
 

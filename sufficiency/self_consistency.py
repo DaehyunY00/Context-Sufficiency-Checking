@@ -22,7 +22,7 @@ class SelfConsistencyChecker(BaseChecker):
     def __init__(
         self,
         generator,
-        n_samples: int = 5,
+        n_samples: int = 3,
         temperature: float = 0.7,
         disagreement_threshold: float = 0.6,
         abstain_text: str = "모르겠습니다.",

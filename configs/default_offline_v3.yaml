@@ -1,50 +1,47 @@
 run:
-  language: "ko"
+  language: ko
   seed: 42
-  device_preference: ["mps", "cpu"]
+  device_preference:
+  - mps
+  - cpu
   force_mps: false
-  hf_cache_dir: ".hf_cache"
-  output_dir: "outputs"
+  hf_cache_dir: .hf_cache
+  output_dir: outputs
   log_jsonl: true
-
 dataset:
-  name: "hotpotqa"
-  split: "validation"
+  name: hotpotqa
+  split: validation
   max_questions: 500
   corpus_chunk:
     chunk_size: 300
     chunk_overlap: 50
-
 retrieval:
-  embed_model: "intfloat/e5-small-v2"
-  index_type: "faiss_cpu"
+  embed_model: intfloat/e5-small-v2
+  index_type: faiss_cpu
   top_k_initial: 3
   top_k_reretrieve: 6
-
 generator:
-  model_name: "google/flan-t5-large"
+  model_name: google/flan-t5-large
   max_input_length: 1024
   max_new_tokens: 32
   temperature: 0.2
   do_sample: false
-  prompt_style: "qa_short_ko"
-  abstain_text: "모르겠습니다."
-
+  prompt_style: qa_short_ko
+  abstain_text: 모르겠습니다.
 autorater:
   enabled: true
-  model_name: "Qwen/Qwen2.5-0.5B-Instruct"
+  model_name: google/flan-t5-base
   max_input_length: 1024
-  max_new_tokens: 96
+  max_new_tokens: 72
   temperature: 0.0
   do_sample: false
-  output_format: "json_one_line"
-  parse_fail_policy: "insufficient"
+  output_format: json_one_line
+  parse_fail_policy: insufficient
   max_parse_retries: 1
-  max_context_chars: 1800
-  prompt_template: "templates/autorater_ko.txt"
-
+  max_context_chars: 1600
+  prompt_template: templates/autorater_ko.txt
 sufficiency:
-  checker: "heuristic"
+  checker: heuristic
   heuristic:
     min_keyword_hits: 2
     min_coverage_ratio: 0.5
@@ -54,22 +51,25 @@ sufficiency:
     disagreement_threshold: 0.6
   entailment:
     enabled: false
-    model_name: "roberta-base-mnli"
+    model_name: roberta-base-mnli
     sufficient_if_entail_prob_ge: 0.6
-
 strategy:
-  mode: "abstain"
+  mode: abstain
   hybrid:
     reretrieve_then_abstain: true
-
 evaluation:
-  metrics: ["em", "f1", "hallucination_rate", "coverage", "selective_accuracy", "latency_ms"]
+  metrics:
+  - em
+  - f1
+  - hallucination_rate
+  - coverage
+  - selective_accuracy
+  - latency_ms
   bootstrap:
     enabled: true
     n_samples: 1000
     confidence_level: 0.95
-
 report:
-  format: "markdown_ko"
+  format: markdown_ko
   save_csv: true
   save_markdown: true

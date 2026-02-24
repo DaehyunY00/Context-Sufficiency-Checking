@@ -66,6 +66,9 @@ def summarize_records(records: List[Dict], abstain_text: str = "모르겠습니�
             "coverage": 0.0,
             "selective_accuracy": 0.0,
             "latency_ms": 0.0,
+            "checker_eval_count": 0.0,
+            "checker_parse_fail_count": 0.0,
+            "checker_parse_success_rate": 0.0,
         }
 
     em_values = [float(r.get("em", 0.0)) for r in records]
@@ -80,6 +83,21 @@ def summarize_records(records: List[Dict], abstain_text: str = "모르겠습니�
     wrong_non_abstain = sum(1 for c, a in zip(is_correct, is_abstain) if c == 0 and a == 0)
     correct_answered = sum(1 for c, a in zip(is_correct, is_abstain) if c == 1 and a == 0)
 
+    checker_records = [
+        r
+        for r in records
+        if str(r.get("checker_name", "none")).strip().lower() not in {"", "none", "없음"}
+    ]
+    checker_eval_count = len(checker_records)
+    checker_parse_fail_count = sum(
+        1
+        for r in checker_records
+        if isinstance(r.get("checker_meta"), dict) and str(r.get("checker_meta", {}).get("파싱오류", "")).strip() != ""
+    )
+    checker_parse_success_rate = (
+        float((checker_eval_count - checker_parse_fail_count) / checker_eval_count) if checker_eval_count > 0 else 0.0
+    )
+
     return {
         "sample_count": float(total),
         "em": float(np.mean(em_values)),
@@ -88,6 +106,9 @@ def summarize_records(records: List[Dict], abstain_text: str = "모르겠습니�
         "coverage": float(answered / total),
         "selective_accuracy": float(correct_answered / answered) if answered > 0 else 0.0,
         "latency_ms": float(np.mean(latency_values)),
+        "checker_eval_count": float(checker_eval_count),
+        "checker_parse_fail_count": float(checker_parse_fail_count),
+        "checker_parse_success_rate": checker_parse_success_rate,
     }
 
 
