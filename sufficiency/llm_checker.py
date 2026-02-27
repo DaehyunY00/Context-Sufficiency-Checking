@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 import json
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,16 +42,6 @@ class LLMAutoraterChecker(BaseChecker):
             raise FileNotFoundError(f"autorater 템플릿 파일이 없습니다: {path}")
         return path.read_text(encoding="utf-8")
 
-    @staticmethod
-    def _sanitize_json_candidate(text: str) -> str:
-        repaired = str(text).strip()
-        repaired = re.sub(r"^```(?:json)?", "", repaired, flags=re.IGNORECASE).strip()
-        repaired = repaired.replace("```", "").strip()
-        repaired = repaired.replace("'", '"')
-        repaired = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', repaired)
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-        return repaired
-
     @classmethod
     def _try_parse_dict(cls, candidate: str) -> Optional[Dict[str, Any]]:
         text = str(candidate).strip()
@@ -64,46 +52,9 @@ class LLMAutoraterChecker(BaseChecker):
             parsed = json.loads(text)
             return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
-            pass
-
-        try:
-            parsed = ast.literal_eval(text)
-            return parsed if isinstance(parsed, dict) else None
-        except (ValueError, SyntaxError):
-            pass
-
-        repaired = cls._sanitize_json_candidate(text)
-        if repaired != text:
-            try:
-                parsed = json.loads(repaired)
-                return parsed if isinstance(parsed, dict) else None
-            except json.JSONDecodeError:
-                pass
-            try:
-                parsed = ast.literal_eval(repaired)
-                return parsed if isinstance(parsed, dict) else None
-            except (ValueError, SyntaxError):
-                pass
+            return None
 
         return None
-
-    @staticmethod
-    def _recover_label_only(raw_text: str) -> Optional[Dict[str, Any]]:
-        text = str(raw_text)
-        label_match = re.search(r"\b(INSUFFICIENT|SUFFICIENT)\b", text.upper())
-        if not label_match:
-            return None
-        label = label_match.group(1)
-
-        confidence = 0.0
-        conf_match = re.search(r"(?<!\d)(0(?:\.\d+)?|1(?:\.0+)?)(?!\d)", text)
-        if conf_match:
-            try:
-                confidence = max(0.0, min(1.0, float(conf_match.group(1))))
-            except ValueError:
-                confidence = 0.0
-
-        return {"label": label, "confidence": confidence, "missing_info": []}
 
     @classmethod
     def _extract_json(cls, raw_text: str) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -111,32 +62,16 @@ class LLMAutoraterChecker(BaseChecker):
         if not text:
             return None, "empty_output"
 
-        candidates: List[Tuple[str, str]] = [("strict_json", text)]
+        # Strict mode: JSON 한 줄 전체가 스키마 객체여야 하며, 부가 텍스트를 허용하지 않는다.
+        if "\n" in text or "\r" in text:
+            return None, "strict_json_line_violation"
+        if not (text.startswith("{") and text.endswith("}")):
+            return None, "strict_json_boundary_violation"
 
-        cleaned = cls._sanitize_json_candidate(text)
-        if cleaned and cleaned != text:
-            candidates.append(("sanitized_full_text", cleaned))
-
-        for match in re.finditer(r"\{[^{}]*\}", text, flags=re.DOTALL):
-            frag = match.group(0).strip()
-            if frag:
-                candidates.append(("json_fragment", frag))
-
-        seen = set()
-        for method, candidate in candidates:
-            key = (method, candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            parsed = cls._try_parse_dict(candidate)
-            if parsed is not None:
-                return parsed, method
-
-        recovered = cls._recover_label_only(text)
-        if recovered is not None:
-            return recovered, "label_only_recovery"
-
-        return None, "json_parse_failed"
+        parsed = cls._try_parse_dict(text)
+        if parsed is None:
+            return None, "strict_json_decode_failed"
+        return parsed, "strict_json"
 
     def _render_prompt(self, question: str, contexts: List[str]) -> str:
         context_block = format_contexts(contexts, max_chars=self.max_context_chars)

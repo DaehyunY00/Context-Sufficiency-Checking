@@ -17,9 +17,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=str(ROOT / "configs" / "default.yaml"))
     parser.add_argument("--run-name", type=str, default="sufficiency_run")
     parser.add_argument("--checker", type=str, default=None, choices=["heuristic", "autorater", "self_consistency", "entailment"])
-    parser.add_argument("--strategy", type=str, default=None, choices=["abstain", "reretrieve", "hybrid"])
+    parser.add_argument("--strategy", type=str, default=None, choices=["abstain", "reretrieve", "hybrid", "uncertainty_abstain"])
+    parser.add_argument(
+        "--uncertainty-metric",
+        type=str,
+        default=None,
+        choices=["avg_token_prob", "entropy_confidence", "avg_logprob"],
+    )
+    parser.add_argument("--uncertainty-threshold", type=float, default=None)
     parser.add_argument("--max-questions", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     return parser.parse_args()
 
 
@@ -31,9 +39,16 @@ def main() -> None:
         config.setdefault("dataset", {})["max_questions"] = int(args.max_questions)
     if args.output_dir is not None:
         config.setdefault("run", {})["output_dir"] = args.output_dir
+    if args.seed is not None:
+        config.setdefault("run", {})["seed"] = int(args.seed)
 
     checker = args.checker or str(config.get("sufficiency", {}).get("checker", "heuristic"))
     strategy = args.strategy or str(config.get("strategy", {}).get("mode", "abstain"))
+    strategy_overrides = {}
+    if args.uncertainty_metric is not None:
+        strategy_overrides["metric"] = args.uncertainty_metric
+    if args.uncertainty_threshold is not None:
+        strategy_overrides["threshold"] = float(args.uncertainty_threshold)
 
     pipeline = RAGPipeline(config=config, project_root=ROOT)
 
@@ -47,7 +62,8 @@ def main() -> None:
     cand_row, _, paths = pipeline.run_experiment(
         run_name=args.run_name,
         strategy_mode=strategy,
-        checker_name=checker,
+        checker_name=(None if strategy == "uncertainty_abstain" else checker),
+        strategy_overrides=(strategy_overrides if strategy_overrides else None),
         baseline_records=base_records,
     )
 

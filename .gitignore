@@ -48,3 +48,7 @@ outputs/*
 # Local caches
 .cache/
 .hf_cache/
+.mplcache/
+
+
+.outputs/

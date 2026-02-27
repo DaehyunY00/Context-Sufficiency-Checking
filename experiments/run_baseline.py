@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", type=str, default="baseline")
     parser.add_argument("--max-questions", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     return parser.parse_args()
 
 
@@ -29,6 +30,8 @@ def main() -> None:
         config.setdefault("dataset", {})["max_questions"] = int(args.max_questions)
     if args.output_dir is not None:
         config.setdefault("run", {})["output_dir"] = args.output_dir
+    if args.seed is not None:
+        config.setdefault("run", {})["seed"] = int(args.seed)
 
     pipeline = RAGPipeline(config=config, project_root=ROOT)
     row, _, paths = pipeline.run_experiment(run_name=args.run_name, strategy_mode="baseline", checker_name=None)

@@ -16,5 +16,9 @@ class BaseChecker(ABC):
 
     @abstractmethod
     def predict(self, question: str, contexts: List[str]) -> CheckerResult:
-        """(label, score, meta)를 반환한다."""
+        """
+        (label, score, meta)를 반환한다.
+        - label: SUFFICIENT | INSUFFICIENT
+        - score: P(answerable | q, C_k)에 해당하는 0~1 점수(권장)
+        """
         raise NotImplementedError

@@ -29,7 +29,8 @@ class SelfConsistencyChecker(BaseChecker):
         prompt_style: str = "qa_short_ko",
     ) -> None:
         self.generator = generator
-        self.n_samples = int(n_samples)
+        # 기본값은 5를 권장하지만, 실험 비교(n=3 vs n=5)를 위해 override 값을 그대로 허용한다.
+        self.n_samples = max(2, int(n_samples))
         self.temperature = float(temperature)
         self.disagreement_threshold = float(disagreement_threshold)
         self.abstain_text = abstain_text
@@ -55,6 +56,7 @@ class SelfConsistencyChecker(BaseChecker):
 
         majority_ratio = max_count / max(1, len(normalized))
         disagreement = 1.0 - majority_ratio
+        answerable_prob = max(0.0, min(1.0, majority_ratio))
         abstain_ratio = sum(1 for a in answers if a.strip() == self.abstain_text) / max(1, len(answers))
 
         label = INSUFFICIENT if disagreement >= self.disagreement_threshold else SUFFICIENT
@@ -63,12 +65,14 @@ class SelfConsistencyChecker(BaseChecker):
 
         return (
             label,
-            float(disagreement),
+            float(answerable_prob),
             {
                 "샘플답변": answers,
                 "정규화답변": normalized,
+                "n_samples": self.n_samples,
                 "불일치도": disagreement,
                 "다수결비율": majority_ratio,
+                "추정_정답가능확률": answerable_prob,
                 "모르겠습니다_비율": abstain_ratio,
                 "임계값": self.disagreement_threshold,
             },

@@ -38,10 +38,7 @@ class EntailmentChecker(BaseChecker):
                 return 0
         return -1
 
-    def predict(self, question: str, contexts: List[str]):
-        premise = " ".join([str(c) for c in contexts])[:2000]
-        hypothesis = f"The context is sufficient to answer the question: {question}"
-
+    def score_entailment(self, premise: str, hypothesis: str) -> float:
         result = self.classifier({"text": premise, "text_pair": hypothesis})[0]
         entail_prob = 0.0
         for item in result:
@@ -49,6 +46,12 @@ class EntailmentChecker(BaseChecker):
             score = float(item.get("score", 0.0))
             if "entail" in label or label == "label_2":
                 entail_prob = max(entail_prob, score)
+        return float(entail_prob)
+
+    def predict(self, question: str, contexts: List[str]):
+        premise = " ".join([str(c) for c in contexts])[:2000]
+        hypothesis = f"The context is sufficient to answer the question: {question}"
+        entail_prob = self.score_entailment(premise=premise, hypothesis=hypothesis)
 
         label = SUFFICIENT if entail_prob >= self.threshold else INSUFFICIENT
         return label, entail_prob, {"entail_prob": entail_prob, "임계값": self.threshold}
