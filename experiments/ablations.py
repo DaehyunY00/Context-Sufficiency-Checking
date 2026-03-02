@@ -85,7 +85,9 @@ def _autorater_preflight(pipeline: RAGPipeline, n_samples: int) -> Dict:
     parse_method_counts: Counter = Counter()
     label_counts: Counter = Counter()
 
-    for sample in pipeline.examples[:n]:
+    for idx, sample in enumerate(pipeline.examples[:n], start=1):
+        if idx == 1 or idx % 2 == 0 or idx == n:
+            print(f"[autorater 사전점검 진행] {idx}/{n}")
         docs = pipeline._retrieve(sample["question"], pipeline.k_initial)
         contexts = [d["text"] for d in docs]
         label, _, meta = checker.predict(sample["question"], contexts)

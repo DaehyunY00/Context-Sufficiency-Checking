@@ -77,6 +77,7 @@ def configure_hf_cache(run_cfg: Dict) -> Dict[str, str]:
 def probe_mps_status() -> Dict[str, str | bool]:
     """현재 파이썬 환경에서 MPS 사용 가능 여부를 점검한다."""
     macos_version = str(platform.mac_ver()[0] or "").strip()
+    py_version = str(platform.python_version() or "").strip()
     built = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built())
     available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
     error = ""
@@ -103,9 +104,19 @@ def probe_mps_status() -> Dict[str, str | bool]:
                         "MPS 미활성은 macOS/파이썬/torch 조합 문제일 수 있습니다. "
                         "Python 3.11~3.12 기반 새 환경에서 torch 안정 버전 재설치를 권장합니다."
                     )
+        try:
+            py_major, py_minor = [int(x) for x in py_version.split(".")[:2]]
+            if py_major >= 3 and py_minor >= 13:
+                hint = (
+                    "현재 Python 3.13 환경에서는 MPS가 비활성인 경우가 있습니다. "
+                    "Python 3.12 환경에서 torch 안정 버전으로 재설치해 점검하세요."
+                )
+        except Exception:
+            pass
 
     return {
         "torch_version": str(torch.__version__),
+        "python_version": py_version,
         "macos_version": macos_version,
         "mps_built": built,
         "mps_available": available,
@@ -496,6 +507,7 @@ class RAGPipeline:
         if "mps" in [str(x).lower().strip() for x in self.device_preference]:
             print(
                 f"[장치 점검] torch={mps_status['torch_version']} | "
+                f"python={mps_status.get('python_version', 'unknown')} | "
                 f"macOS={mps_status['macos_version'] or 'unknown'} | "
                 f"mps_built={mps_status['mps_built']} | mps_available={mps_status['mps_available']}"
             )
@@ -576,8 +588,12 @@ class RAGPipeline:
             torch_dtype=generator_cfg.get("torch_dtype"),
             low_cpu_mem_usage=bool(generator_cfg.get("low_cpu_mem_usage", True)),
             trust_remote_code=bool(generator_cfg.get("trust_remote_code", False)),
+            backend=str(generator_cfg.get("backend", "transformers")),
+            allow_backend_fallback=bool(generator_cfg.get("allow_backend_fallback", True)),
+            ollama_url=str(generator_cfg.get("ollama_url", "http://localhost:11434/api/generate")),
+            ollama_timeout_sec=int(generator_cfg.get("ollama_timeout_sec", 180)),
         )
-        print(f"[장치] 생성 장치: {self.generator.device}")
+        print(f"[장치] 생성 장치: {self.generator.runtime_device_label}")
 
         self.checker_cache: Dict[str, object] = {}
         eval_cfg = self.config.get("evaluation", {})
@@ -650,6 +666,10 @@ class RAGPipeline:
                     torch_dtype=auto_cfg.get("torch_dtype"),
                     low_cpu_mem_usage=bool(auto_cfg.get("low_cpu_mem_usage", True)),
                     trust_remote_code=bool(auto_cfg.get("trust_remote_code", False)),
+                    backend=str(auto_cfg.get("backend", self.config.get("generator", {}).get("backend", "transformers"))),
+                    allow_backend_fallback=bool(auto_cfg.get("allow_backend_fallback", self.config.get("generator", {}).get("allow_backend_fallback", True))),
+                    ollama_url=str(auto_cfg.get("ollama_url", self.config.get("generator", {}).get("ollama_url", "http://localhost:11434/api/generate"))),
+                    ollama_timeout_sec=int(auto_cfg.get("ollama_timeout_sec", self.config.get("generator", {}).get("ollama_timeout_sec", 180))),
                 )
 
             prompt_path_cfg = str(auto_cfg.get("prompt_template", "templates/autorater_ko.txt"))
@@ -1129,6 +1149,14 @@ class RAGPipeline:
         if checker_name is None and strategy_mode == "flare_lite":
             effective_checker_name = "flare_lite"
         checker = self._build_checker(checker_name, checker_overrides)
+        run_cfg = self.config.get("run", {})
+        progress_every = int(run_cfg.get("progress_every", 20))
+        progress_every_env = str(os.environ.get("CS_PROGRESS_EVERY", "")).strip()
+        if progress_every_env:
+            try:
+                progress_every = max(1, int(progress_every_env))
+            except ValueError:
+                pass
 
         print(
             f"[실험 시작] 이름={run_name} | 전략={strategy_mode} | 체커={effective_checker_name or '없음'} | "
@@ -1192,12 +1220,15 @@ class RAGPipeline:
                 "generation_avg_token_entropy": out.get("uncertainty_meta", {}).get("avg_token_entropy", ""),
                 "generation_entropy_confidence": out.get("uncertainty_meta", {}).get("entropy_confidence", ""),
                 "embedder_device": str(self.embedder.device),
-                "generator_device": str(self.generator.device),
+                "generator_device": str(getattr(self.generator, "runtime_device_label", str(self.generator.device))),
             }
             records.append(record)
 
-            if idx % 20 == 0:
-                print(f"[진행] {run_name}: {idx}/{len(self.examples)}")
+            if progress_every > 0 and (idx == 1 or idx % progress_every == 0):
+                print(
+                    f"[진행] {run_name}: {idx}/{len(self.examples)} | "
+                    f"질문ID={sample['question_id']} | 지연={latency_ms:.1f}ms"
+                )
 
         eval_cfg = self.config.get("evaluation", {})
         calibration_bins = int(eval_cfg.get("calibration_bins", 10))

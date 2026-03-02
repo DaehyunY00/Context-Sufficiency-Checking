@@ -19,6 +19,7 @@ def load_config(config_path: str | Path):
 
 def probe_mps_status():
     macos_version = str(platform.mac_ver()[0] or "").strip()
+    py_version = str(platform.python_version() or "").strip()
     built = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built())
     available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
     error = ""
@@ -44,8 +45,18 @@ def probe_mps_status():
                         "MPS 미활성은 macOS/파이썬/torch 조합 문제일 수 있습니다. "
                         "Python 3.11~3.12 환경에서 torch 안정 버전 재설치를 권장합니다."
                     )
+        try:
+            py_major, py_minor = [int(x) for x in py_version.split(".")[:2]]
+            if py_major >= 3 and py_minor >= 13:
+                hint = (
+                    "현재 Python 3.13 환경에서는 MPS가 비활성인 경우가 있습니다. "
+                    "Python 3.12 환경에서 torch 안정 버전으로 재설치해 점검하세요."
+                )
+        except Exception:
+            pass
     return {
         "torch_version": str(torch.__version__),
+        "python_version": py_version,
         "macos_version": macos_version,
         "mps_built": built,
         "mps_available": available,
@@ -68,6 +79,7 @@ def main() -> None:
     status = probe_mps_status()
     print("[장치 점검 결과]")
     print(f"- torch 버전: {status['torch_version']}")
+    print(f"- python 버전: {status.get('python_version', 'unknown')}")
     print(f"- macOS 버전: {status['macos_version'] or 'unknown'}")
     print(f"- mps 빌드 포함 여부: {status['mps_built']}")
     print(f"- mps 사용 가능 여부: {status['mps_available']}")

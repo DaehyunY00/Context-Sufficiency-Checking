@@ -2,7 +2,6 @@ run:
   language: "ko"
   seed: 42
   seed_list: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
-  progress_every: 20
   device_preference: ["mps", "cpu"]
   force_mps: false
   hf_cache_dir: ".hf_cache"
@@ -10,38 +9,36 @@ run:
   log_jsonl: true
 
 dataset:
-  name: "hotpotqa"
-  # 2Wiki를 사용할 경우 예:
-  # name: "2wikimultihopqa"
-  # hf_name: "scholarly-shadows-syndicate/2wikimultihopqa"
-  # hf_config: null
+  name: "2wikimultihopqa"
+  hf_name: "scholarly-shadows-syndicate/2wikimultihopqa"
+  hf_config: null
   split: "validation"
-  max_questions: 500
+  max_questions: 3000
   corpus_chunk:
     chunk_size: 300
     chunk_overlap: 50
 
 retrieval:
-  model_type: "sentence_transformer"  # sentence_transformer | dpr
+  model_type: "sentence_transformer"
   embed_model: "intfloat/e5-small-v2"
-  query_model_name: null              # model_type=dpr일 때 사용
-  corpus_model_name: null             # model_type=dpr일 때 사용
-  max_length: 256                     # model_type=dpr 토큰 길이
+  query_model_name: null
+  corpus_model_name: null
+  max_length: 256
   index_type: "faiss_cpu"
   top_k_initial: 3
   top_k_reretrieve: 6
 
 generator:
-  backend: "transformers"   # transformers | auto | ollama
+  backend: "ollama"
   allow_backend_fallback: false
   ollama_url: "http://localhost:11434/api/generate"
-  ollama_timeout_sec: 180
-  model_name: "google/flan-t5-large"
-  torch_dtype: null        # 예: "float16", "bfloat16"
+  ollama_timeout_sec: 300
+  model_name: "llama3.1:8b-instruct-q4_K_M"
+  torch_dtype: null
   low_cpu_mem_usage: true
   trust_remote_code: false
-  max_input_length: 1024
-  max_new_tokens: 32
+  max_input_length: 1536
+  max_new_tokens: 48
   temperature: 0.2
   do_sample: false
   prompt_style: "qa_short_ko"
@@ -49,15 +46,15 @@ generator:
 
 autorater:
   enabled: true
-  backend: "transformers"
+  backend: "ollama"
   allow_backend_fallback: false
   ollama_url: "http://localhost:11434/api/generate"
-  ollama_timeout_sec: 180
-  model_name: "google/flan-t5-large"
+  ollama_timeout_sec: 300
+  model_name: "llama3.1:8b-instruct-q4_K_M"
   torch_dtype: null
   low_cpu_mem_usage: true
   trust_remote_code: false
-  max_input_length: 1024
+  max_input_length: 1536
   max_new_tokens: 96
   temperature: 0.0
   do_sample: false
@@ -90,7 +87,7 @@ strategy:
   hybrid:
     reretrieve_then_abstain: true
   bm25_threshold:
-    score_metric: "softmax_top1"   # softmax_top1 | sigmoid_max
+    score_metric: "softmax_top1"
     threshold: 0.50
   random_abstain:
     abstain_rate: 0.10
@@ -127,7 +124,7 @@ evaluation:
     warmup_drop: 5
     hist_bins: 30
   answerable:
-    mode: "gold_containment"  # gold_containment | entailment
+    mode: "gold_containment"
     entail_model_name: "cross-encoder/nli-distilroberta-base"
     entail_prob_threshold: 0.6
   bootstrap:

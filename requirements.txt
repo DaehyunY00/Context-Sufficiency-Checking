@@ -10,3 +10,4 @@ tqdm>=4.67.1
 numpy>=1.26.0,<3.0.0
 accelerate>=1.2.1
 matplotlib>=3.8.0
+requests>=2.31.0

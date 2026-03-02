@@ -2,8 +2,9 @@ run:
   language: "ko"
   seed: 42
   seed_list: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+  progress_every: 5
   device_preference: ["mps", "cpu"]
-  force_mps: false
+  force_mps: true
   hf_cache_dir: ".hf_cache"
   output_dir: "outputs"
   log_jsonl: true
@@ -29,6 +30,10 @@ retrieval:
   top_k_reretrieve: 6
 
 generator:
+  backend: "transformers"
+  allow_backend_fallback: false
+  ollama_url: "http://localhost:11434/api/generate"
+  ollama_timeout_sec: 180
   model_name: "meta-llama/Meta-Llama-3.1-8B-Instruct"
   torch_dtype: "float16"
   low_cpu_mem_usage: true
@@ -42,6 +47,10 @@ generator:
 
 autorater:
   enabled: true
+  backend: "transformers"
+  allow_backend_fallback: false
+  ollama_url: "http://localhost:11434/api/generate"
+  ollama_timeout_sec: 180
   model_name: "meta-llama/Meta-Llama-3.1-8B-Instruct"
   torch_dtype: "float16"
   low_cpu_mem_usage: true

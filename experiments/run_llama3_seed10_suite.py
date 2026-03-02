@@ -30,6 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--include-bm25-threshold-baseline", action="store_true")
     parser.add_argument("--include-random-matched-baseline", action="store_true")
+    parser.add_argument("--autorater-preflight-samples", type=int, default=4)
+    parser.add_argument("--autorater-min-parse-success", type=float, default=0.30)
+    parser.add_argument("--autorater-force-run", action="store_true")
     parser.add_argument("--skip-answerable-crosscheck", action="store_true")
     parser.add_argument("--skip-retriever-generalization", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -64,7 +67,13 @@ def main() -> None:
             args.checkers,
             "--output-dir",
             out_dir,
+            "--autorater-preflight-samples",
+            str(int(args.autorater_preflight_samples)),
+            "--autorater-min-parse-success",
+            str(float(args.autorater_min_parse_success)),
         ]
+        if bool(args.autorater_force_run):
+            cmd += ["--autorater-force-run"]
         if args.max_questions is not None:
             cmd += ["--max-questions", str(args.max_questions)]
         if args.include_bm25_threshold_baseline:
@@ -122,4 +131,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

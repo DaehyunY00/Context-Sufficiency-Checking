@@ -7,6 +7,11 @@ from typing import Dict, Iterable, Optional, Sequence
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer, set_seed
 
+try:
+    import requests
+except Exception:  # pragma: no cover
+    requests = None
+
 from generator.utils import build_qa_prompt, clean_generated_text
 
 
@@ -32,9 +37,20 @@ class LocalHFTextGenerator:
         torch_dtype: Optional[str] = None,
         low_cpu_mem_usage: bool = True,
         trust_remote_code: bool = False,
+        backend: str = "transformers",
+        allow_backend_fallback: bool = True,
+        ollama_url: str = "http://localhost:11434/api/generate",
+        ollama_timeout_sec: int = 180,
     ) -> None:
         self.model_name = model_name
         self.max_input_length = int(max_input_length)
+        self.backend = str(backend).strip().lower() or "transformers"
+        if self.backend not in {"transformers", "auto", "ollama"}:
+            raise ValueError(f"지원하지 않는 generator.backend: {backend}")
+        self.allow_backend_fallback = bool(allow_backend_fallback)
+        self.ollama_url = str(ollama_url).strip() or "http://localhost:11434/api/generate"
+        self.ollama_timeout_sec = int(max(5, ollama_timeout_sec))
+
         self.device = torch.device(self._resolve_device(device_preference or ["mps", "cpu"]))
         self.default_params = GenerationParams(
             max_new_tokens=int(max_new_tokens),
@@ -42,15 +58,53 @@ class LocalHFTextGenerator:
             do_sample=bool(do_sample),
         )
 
+        self.tokenizer = None
+        self.model = None
+        self.is_encoder_decoder = False
+
         if num_threads is not None and num_threads > 0:
             torch.set_num_threads(int(num_threads))
 
+        if self.backend == "ollama":
+            self._check_ollama_available()
+            return
+
+        try:
+            self._init_transformers_model(
+                trust_remote_code=bool(trust_remote_code),
+                low_cpu_mem_usage=bool(low_cpu_mem_usage),
+                torch_dtype=torch_dtype,
+            )
+            self.backend = "transformers"
+        except Exception as exc:
+            if self.backend == "auto" and self.allow_backend_fallback:
+                self.backend = "ollama"
+                self._check_ollama_available()
+                print(
+                    "[생성기] transformers 로딩 실패로 ollama backend로 전환합니다: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                raise
+
+    @property
+    def runtime_device_label(self) -> str:
+        if self.backend == "ollama":
+            return "metal(ollama)"
+        return str(self.device)
+
+    def _init_transformers_model(
+        self,
+        trust_remote_code: bool,
+        low_cpu_mem_usage: bool,
+        torch_dtype: Optional[str],
+    ) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            self.model_name,
             trust_remote_code=bool(trust_remote_code),
         )
         config = AutoConfig.from_pretrained(
-            model_name,
+            self.model_name,
             trust_remote_code=bool(trust_remote_code),
         )
         self.is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
@@ -61,18 +115,39 @@ class LocalHFTextGenerator:
         }
         parsed_dtype = self._parse_torch_dtype(torch_dtype)
         if parsed_dtype is not None:
-            model_kwargs["torch_dtype"] = parsed_dtype
+            # transformers 최신 버전 권장 키워드(dtype) 우선 사용
+            model_kwargs["dtype"] = parsed_dtype
 
-        if self.is_encoder_decoder:
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **model_kwargs)
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        model_cls = AutoModelForSeq2SeqLM if self.is_encoder_decoder else AutoModelForCausalLM
+        try:
+            self.model = model_cls.from_pretrained(self.model_name, **model_kwargs)
+        except TypeError as exc:
+            # 구버전 호환: dtype 미지원 시 torch_dtype로 재시도
+            if parsed_dtype is None or "dtype" not in str(exc):
+                raise
+            legacy_kwargs = dict(model_kwargs)
+            legacy_kwargs.pop("dtype", None)
+            legacy_kwargs["torch_dtype"] = parsed_dtype
+            self.model = model_cls.from_pretrained(self.model_name, **legacy_kwargs)
 
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.model.to(self.device)
         self.model.eval()
+
+    def _check_ollama_available(self) -> None:
+        if requests is None:
+            raise RuntimeError("ollama backend 사용을 위해 requests 패키지가 필요합니다.")
+        tags_url = self.ollama_url.replace("/api/generate", "/api/tags")
+        try:
+            resp = requests.get(tags_url, timeout=5)
+            resp.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(
+                f"ollama 서버 접근 실패: {tags_url} ({exc})\n"
+                "대안: `ollama serve` 실행 또는 generator.backend를 transformers로 변경"
+            ) from exc
 
     @staticmethod
     def _parse_torch_dtype(dtype_name: Optional[str]):
@@ -101,10 +176,82 @@ class LocalHFTextGenerator:
         return "cpu"
 
     def _fallback_to_cpu(self) -> None:
+        if self.backend != "transformers":
+            return
         if self.device.type == "cpu":
             return
         self.model.to("cpu")
         self.device = torch.device("cpu")
+
+    def _build_generate_kwargs(
+        self,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        do_sample: bool,
+        with_scores: bool = False,
+    ) -> Dict:
+        kwargs: Dict = {
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": bool(do_sample),
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+        }
+        if bool(do_sample):
+            kwargs["temperature"] = float(max(1e-5, temperature))
+        else:
+            # deterministic 생성 시 sampling 관련 경고(top_p ignored) 방지
+            kwargs["temperature"] = 1.0
+            kwargs["top_p"] = 1.0
+
+        if with_scores:
+            kwargs["return_dict_in_generate"] = True
+            kwargs["output_scores"] = True
+        return kwargs
+
+    @staticmethod
+    def _estimate_text_confidence(text: str) -> float:
+        answer = str(text or "").strip().lower()
+        if not answer:
+            return 0.05
+        if "모르겠습니다" in answer or "알 수 없" in answer:
+            return 0.05
+        if len(answer.split()) <= 2:
+            return 0.45
+        return 0.65
+
+    def _ollama_generate(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        do_sample: bool,
+        seed: Optional[int],
+    ) -> Dict:
+        if requests is None:
+            raise RuntimeError("ollama backend 사용을 위해 requests 패키지가 필요합니다.")
+
+        options: Dict[str, float | int] = {"num_predict": int(max_new_tokens)}
+        options["temperature"] = float(temperature if do_sample else 0.0)
+        if seed is not None:
+            options["seed"] = int(seed)
+
+        payload = {
+            "model": self.model_name,
+            "prompt": str(prompt),
+            "stream": False,
+            "options": options,
+        }
+        resp = requests.post(
+            self.ollama_url,
+            json=payload,
+            timeout=self.ollama_timeout_sec,
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.text else {}
+        if not isinstance(data, dict):
+            data = {}
+        return data
 
     def generate_from_prompt(
         self,
@@ -122,9 +269,23 @@ class LocalHFTextGenerator:
         temperature = float(temperature if temperature is not None else params.temperature)
         do_sample = bool(do_sample if do_sample is not None else params.do_sample)
 
+        if self.backend == "ollama":
+            data = self._ollama_generate(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                seed=seed,
+            )
+            text = clean_generated_text(str(data.get("response", "")))
+            return text
+
         if temperature <= 0:
             do_sample = False
             temperature = 1.0
+
+        if self.tokenizer is None or self.model is None:
+            raise RuntimeError("transformers backend 초기화 실패: tokenizer/model이 없습니다.")
 
         inputs = self.tokenizer(
             prompt,
@@ -138,11 +299,11 @@ class LocalHFTextGenerator:
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    do_sample=do_sample,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
+                    **self._build_generate_kwargs(
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        do_sample=do_sample,
+                    ),
                 )
         except RuntimeError as exc:
             if self.device.type != "mps":
@@ -152,11 +313,11 @@ class LocalHFTextGenerator:
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    do_sample=do_sample,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
+                    **self._build_generate_kwargs(
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        do_sample=do_sample,
+                    ),
                 )
 
         if self.is_encoder_decoder:
@@ -182,9 +343,37 @@ class LocalHFTextGenerator:
         temperature = float(temperature if temperature is not None else params.temperature)
         do_sample = bool(do_sample if do_sample is not None else params.do_sample)
 
+        if self.backend == "ollama":
+            data = self._ollama_generate(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                seed=seed,
+            )
+            text = clean_generated_text(str(data.get("response", "")))
+            token_count = int(data.get("eval_count", 0) or 0)
+            if token_count <= 0:
+                token_count = max(1, len(text.split()))
+            conf = float(max(0.0, min(1.0, self._estimate_text_confidence(text))))
+            avg_logprob = float(math.log(max(conf, 1e-8)))
+            avg_entropy_norm = float(max(0.0, min(1.0, 1.0 - conf)))
+            return {
+                "text": text,
+                "token_count": int(token_count),
+                "avg_token_logprob": avg_logprob,
+                "avg_token_prob": conf,
+                "avg_token_entropy": float(avg_entropy_norm),
+                "avg_token_entropy_norm": avg_entropy_norm,
+                "entropy_confidence": conf,
+            }
+
         if temperature <= 0:
             do_sample = False
             temperature = 1.0
+
+        if self.tokenizer is None or self.model is None:
+            raise RuntimeError("transformers backend 초기화 실패: tokenizer/model이 없습니다.")
 
         inputs = self.tokenizer(
             prompt,
@@ -198,13 +387,12 @@ class LocalHFTextGenerator:
             with torch.no_grad():
                 return self.model.generate(
                     **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    do_sample=do_sample,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    return_dict_in_generate=True,
-                    output_scores=True,
+                    **self._build_generate_kwargs(
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        do_sample=do_sample,
+                        with_scores=True,
+                    ),
                 )
 
         try:
