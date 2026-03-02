@@ -9,32 +9,32 @@ run:
   log_jsonl: true
 
 dataset:
-  name: "2wikimultihopqa"
-  hf_name: "scholarly-shadows-syndicate/2wikimultihopqa"
+  name: "strategyqa"
+  hf_name: "ChilleD/StrategyQA"
   hf_config: null
-  split: "validation"
+  split: "train"
   max_questions: 300
   corpus_chunk:
     chunk_size: 300
     chunk_overlap: 50
 
 retrieval:
-  model_type: "sentence_transformer"  # sentence_transformer | dpr
+  model_type: "sentence_transformer"
   embed_model: "intfloat/e5-small-v2"
-  query_model_name: null              # model_type=dpr일 때 사용
-  corpus_model_name: null             # model_type=dpr일 때 사용
-  max_length: 256                     # model_type=dpr 토큰 길이
+  query_model_name: null
+  corpus_model_name: null
+  max_length: 256
   index_type: "faiss_cpu"
   top_k_initial: 3
   top_k_reretrieve: 6
 
 generator:
-  model_name: "google/flan-t5-large"
-  torch_dtype: null
+  model_name: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  torch_dtype: "float16"
   low_cpu_mem_usage: true
   trust_remote_code: false
-  max_input_length: 1024
-  max_new_tokens: 32
+  max_input_length: 1536
+  max_new_tokens: 48
   temperature: 0.2
   do_sample: false
   prompt_style: "qa_short_ko"
@@ -42,11 +42,11 @@ generator:
 
 autorater:
   enabled: true
-  model_name: "google/flan-t5-large"
-  torch_dtype: null
+  model_name: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  torch_dtype: "float16"
   low_cpu_mem_usage: true
   trust_remote_code: false
-  max_input_length: 1024
+  max_input_length: 1536
   max_new_tokens: 96
   temperature: 0.0
   do_sample: false
@@ -116,7 +116,7 @@ evaluation:
     warmup_drop: 5
     hist_bins: 30
   answerable:
-    mode: "gold_containment"  # gold_containment | entailment
+    mode: "gold_containment"
     entail_model_name: "cross-encoder/nli-distilroberta-base"
     entail_prob_threshold: 0.6
   bootstrap:

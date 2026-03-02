@@ -29,6 +29,9 @@ class LocalHFTextGenerator:
         temperature: float = 0.2,
         do_sample: bool = False,
         num_threads: Optional[int] = None,
+        torch_dtype: Optional[str] = None,
+        low_cpu_mem_usage: bool = True,
+        trust_remote_code: bool = False,
     ) -> None:
         self.model_name = model_name
         self.max_input_length = int(max_input_length)
@@ -42,20 +45,49 @@ class LocalHFTextGenerator:
         if num_threads is not None and num_threads > 0:
             torch.set_num_threads(int(num_threads))
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        config = AutoConfig.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=bool(trust_remote_code),
+        )
+        config = AutoConfig.from_pretrained(
+            model_name,
+            trust_remote_code=bool(trust_remote_code),
+        )
         self.is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
 
+        model_kwargs: Dict = {
+            "low_cpu_mem_usage": bool(low_cpu_mem_usage),
+            "trust_remote_code": bool(trust_remote_code),
+        }
+        parsed_dtype = self._parse_torch_dtype(torch_dtype)
+        if parsed_dtype is not None:
+            model_kwargs["torch_dtype"] = parsed_dtype
+
         if self.is_encoder_decoder:
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **model_kwargs)
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
 
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.model.to(self.device)
         self.model.eval()
+
+    @staticmethod
+    def _parse_torch_dtype(dtype_name: Optional[str]):
+        if dtype_name is None:
+            return None
+        key = str(dtype_name).strip().lower()
+        if key in {"", "none", "auto"}:
+            return None
+        if key in {"float16", "fp16", "half"}:
+            return torch.float16
+        if key in {"bfloat16", "bf16"}:
+            return torch.bfloat16
+        if key in {"float32", "fp32"}:
+            return torch.float32
+        raise ValueError(f"지원하지 않는 torch_dtype: {dtype_name}")
 
     @staticmethod
     def _resolve_device(device_preference: Sequence[str]) -> str:

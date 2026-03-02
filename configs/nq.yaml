@@ -1,7 +1,7 @@
 run:
   language: "ko"
   seed: 42
-  seed_list: [42, 43, 44]
+  seed_list: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
   device_preference: ["mps", "cpu"]
   force_mps: false
   hf_cache_dir: ".hf_cache"
@@ -14,18 +14,26 @@ dataset:
   hf_config: "default"
   split: "validation"
   max_questions: 300
+  drop_empty_gold_answers: true
   corpus_chunk:
     chunk_size: 300
     chunk_overlap: 50
 
 retrieval:
+  model_type: "sentence_transformer"  # sentence_transformer | dpr
   embed_model: "intfloat/e5-small-v2"
+  query_model_name: null              # model_type=dpr일 때 사용
+  corpus_model_name: null             # model_type=dpr일 때 사용
+  max_length: 256                     # model_type=dpr 토큰 길이
   index_type: "faiss_cpu"
   top_k_initial: 3
   top_k_reretrieve: 6
 
 generator:
   model_name: "google/flan-t5-large"
+  torch_dtype: null
+  low_cpu_mem_usage: true
+  trust_remote_code: false
   max_input_length: 1024
   max_new_tokens: 32
   temperature: 0.2
@@ -36,6 +44,9 @@ generator:
 autorater:
   enabled: true
   model_name: "google/flan-t5-large"
+  torch_dtype: null
+  low_cpu_mem_usage: true
+  trust_remote_code: false
   max_input_length: 1024
   max_new_tokens: 96
   temperature: 0.0
@@ -60,13 +71,26 @@ sufficiency:
       compare_samples: [3, 5]
   entailment:
     enabled: false
-    model_name: "roberta-base-mnli"
+    model_name: "cross-encoder/nli-distilroberta-base"
     sufficient_if_entail_prob_ge: 0.6
 
 strategy:
   mode: "abstain"
   hybrid:
     reretrieve_then_abstain: true
+  bm25_threshold:
+    score_metric: "softmax_top1"
+    threshold: 0.50
+  random_abstain:
+    abstain_rate: 0.10
+  flare:
+    enabled: true
+    metric: "avg_token_prob"
+    confidence_threshold: 0.35
+    max_rounds: 2
+    k_growth: 3
+    query_with_draft: true
+    abstain_on_low_conf: false
   uncertainty:
     metric: "avg_token_prob"
     threshold: 0.20
@@ -93,7 +117,7 @@ evaluation:
     hist_bins: 30
   answerable:
     mode: "gold_containment"
-    entail_model_name: "roberta-base-mnli"
+    entail_model_name: "cross-encoder/nli-distilroberta-base"
     entail_prob_threshold: 0.6
   bootstrap:
     enabled: true

@@ -123,9 +123,15 @@ def _resolve_dataset_source(dataset_name: str) -> Tuple[str, Optional[str]]:
         return "scholarly-shadows-syndicate/2wikimultihopqa", None
     if name in {"natural_questions", "nq", "naturalquestions"}:
         return "natural_questions", "default"
+    if name in {"musique", "musique_qa"}:
+        # 기본 경로(필요 시 configs/*.yaml의 hf_name으로 오버라이드 가능)
+        return "dgslibisey/MuSiQue", None
+    if name in {"strategyqa", "strategy_qa"}:
+        # 기본 경로(필요 시 configs/*.yaml의 hf_name으로 오버라이드 가능)
+        return "ChilleD/StrategyQA", None
     raise ValueError(
         "지원하지 않는 dataset.name 입니다. "
-        "기본 지원: hotpotqa, 2wikimultihopqa, natural_questions "
+        "기본 지원: hotpotqa, 2wikimultihopqa, natural_questions, musique, strategyqa "
         f"(입력값: {dataset_name})"
     )
 
@@ -133,7 +139,14 @@ def _resolve_dataset_source(dataset_name: str) -> Tuple[str, Optional[str]]:
 def _extract_question(example: Dict) -> str:
     if isinstance(example.get("question"), dict):
         return str(example.get("question", {}).get("text", ""))
-    return str(example.get("question", ""))
+    if "question" in example:
+        return str(example.get("question", ""))
+    # 일부 StrategyQA/MuSiQue 미러는 input/query 키를 사용한다.
+    if "input" in example:
+        return str(example.get("input", ""))
+    if "query" in example:
+        return str(example.get("query", ""))
+    return ""
 
 
 def _extract_nq_document_tokens(example: Dict) -> List[str]:
@@ -166,58 +179,186 @@ def _extract_nq_document_tokens(example: Dict) -> List[str]:
     return [t for t in tokens if str(t).strip()]
 
 
-def _extract_nq_short_answers(example: Dict) -> List[str]:
+def _iter_nq_annotations(example: Dict) -> List[Dict]:
+    """
+    NQ annotations를 샘플 단위 dict 리스트로 정규화한다.
+    - list 포맷: 그대로 사용
+    - dict-of-lists 포맷: 인덱스별 dict로 변환
+    """
     annotations = example.get("annotations")
-    if not isinstance(annotations, list):
+    if isinstance(annotations, list):
+        return [a for a in annotations if isinstance(a, dict)]
+    if not isinstance(annotations, dict):
+        return []
+
+    max_len = 0
+    for value in annotations.values():
+        if isinstance(value, list):
+            max_len = max(max_len, len(value))
+    if max_len <= 0:
+        return []
+
+    normalized: List[Dict] = []
+    for idx in range(max_len):
+        ann_item: Dict = {}
+        for key, value in annotations.items():
+            if isinstance(value, list):
+                ann_item[key] = value[idx] if idx < len(value) else None
+            else:
+                ann_item[key] = value
+        normalized.append(ann_item)
+    return normalized
+
+
+def _extract_nq_yes_no_answer(raw_value) -> str:
+    """
+    HF natural_questions 포맷의 yes/no 라벨(-1/0/1 또는 문자열)을 정규화한다.
+    일반적으로 -1=없음, 0=no, 1=yes로 기록된다.
+    """
+    try:
+        value_int = int(raw_value)
+        if value_int == 1:
+            return "yes"
+        if value_int == 0:
+            return "no"
+        return ""
+    except (TypeError, ValueError):
+        pass
+
+    value_str = str(raw_value).strip().upper()
+    if value_str == "YES":
+        return "yes"
+    if value_str == "NO":
+        return "no"
+    return ""
+
+
+def _extract_nq_short_answers(example: Dict) -> List[str]:
+    annotations = _iter_nq_annotations(example)
+    if not annotations:
         return []
 
     doc_tokens = _extract_nq_document_tokens(example)
     answers: List[str] = []
 
     for ann in annotations:
-        if not isinstance(ann, dict):
-            continue
+        yes_no = _extract_nq_yes_no_answer(ann.get("yes_no_answer", ""))
+        if yes_no:
+            answers.append(yes_no)
 
-        yes_no = str(ann.get("yes_no_answer", "")).strip().upper()
-        if yes_no in {"YES", "NO"}:
-            answers.append(yes_no.lower())
+        short_answers_raw = ann.get("short_answers", [])
+        if isinstance(short_answers_raw, dict):
+            short_answers = [short_answers_raw]
+        elif isinstance(short_answers_raw, list):
+            short_answers = short_answers_raw
+        else:
+            short_answers = []
 
-        short_answers = ann.get("short_answers", [])
-        if not isinstance(short_answers, list):
-            continue
         for sa in short_answers:
+            if isinstance(sa, str):
+                text = sa.strip()
+                if text:
+                    answers.append(text)
+                continue
             if not isinstance(sa, dict):
                 continue
-            text = str(sa.get("text", "")).strip()
-            if text:
-                answers.append(text)
-                continue
 
-            try:
-                start = int(sa.get("start_token", sa.get("start", -1)))
-                end = int(sa.get("end_token", sa.get("end", -1)))
-            except (TypeError, ValueError):
-                continue
-            if 0 <= start < end <= len(doc_tokens):
-                span = " ".join(doc_tokens[start:end]).strip()
-                if span:
-                    answers.append(span)
+            text_field = sa.get("text", "")
+            if isinstance(text_field, list):
+                for text_item in text_field:
+                    clean = str(text_item).strip()
+                    if clean:
+                        answers.append(clean)
+            else:
+                clean = str(text_field).strip()
+                if clean:
+                    answers.append(clean)
+
+            start_field = sa.get("start_token", sa.get("start", -1))
+            end_field = sa.get("end_token", sa.get("end", -1))
+            if isinstance(start_field, list) and isinstance(end_field, list):
+                span_pairs = zip(start_field, end_field)
+            else:
+                span_pairs = [(start_field, end_field)]
+
+            for start_raw, end_raw in span_pairs:
+                try:
+                    start = int(start_raw)
+                    end = int(end_raw)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= start < end <= len(doc_tokens):
+                    span = " ".join(doc_tokens[start:end]).strip()
+                    if span:
+                        answers.append(span)
 
     uniq: List[str] = []
     seen = set()
-    for a in answers:
-        key = normalize_answer(a)
+    for answer in answers:
+        key = normalize_answer(answer)
         if not key or key in seen:
             continue
         seen.add(key)
-        uniq.append(str(a))
+        uniq.append(str(answer))
     return uniq
 
 
+def _extract_nq_long_answers(example: Dict) -> List[str]:
+    annotations = _iter_nq_annotations(example)
+    if not annotations:
+        return []
+
+    doc_tokens = _extract_nq_document_tokens(example)
+    if not doc_tokens:
+        return []
+
+    answers: List[str] = []
+    for ann in annotations:
+        long_answer = ann.get("long_answer", {})
+        if not isinstance(long_answer, dict):
+            continue
+        try:
+            start = int(long_answer.get("start_token", -1))
+            end = int(long_answer.get("end_token", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= start < end <= len(doc_tokens):
+            span = " ".join(doc_tokens[start:end]).strip()
+            if span:
+                answers.append(span)
+
+    uniq: List[str] = []
+    seen = set()
+    for answer in answers:
+        key = normalize_answer(answer)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        uniq.append(str(answer))
+    return uniq
+
+
+def _is_empty_gold_answer(gold_answer) -> bool:
+    if gold_answer is None:
+        return True
+    if isinstance(gold_answer, list):
+        return len([x for x in gold_answer if str(x).strip()]) == 0
+    return str(gold_answer).strip() == ""
+
+
 def _extract_gold_answer(example: Dict):
+    # StrategyQA 계열 yes/no (bool) 정규화
+    if isinstance(example.get("answer"), bool):
+        return "yes" if bool(example.get("answer")) else "no"
+    if isinstance(example.get("target"), bool):
+        return "yes" if bool(example.get("target")) else "no"
+
     nq_answers = _extract_nq_short_answers(example)
     if nq_answers:
         return nq_answers
+    nq_long_answers = _extract_nq_long_answers(example)
+    if nq_long_answers:
+        return nq_long_answers
 
     if "answer" in example:
         answer = example.get("answer")
@@ -247,6 +388,15 @@ def _extract_gold_answer(example: Dict):
     if "answer_text" in example:
         return str(example.get("answer_text", ""))
 
+    if "answers_text" in example:
+        answers_text = example.get("answers_text")
+        if isinstance(answers_text, list):
+            clean = [str(x) for x in answers_text if str(x).strip()]
+            if clean:
+                return clean
+        if str(answers_text).strip():
+            return str(answers_text)
+
     return str(example.get("answer", ""))
 
 
@@ -274,6 +424,7 @@ def load_examples(config: Dict) -> List[Dict]:
     split = str(dataset_cfg.get("split", "validation"))
     max_questions = int(dataset_cfg.get("max_questions", 500))
     seed = int(run_cfg.get("seed", 42))
+    drop_empty_gold = bool(dataset_cfg.get("drop_empty_gold_answers", False))
     cache_paths = configure_hf_cache(run_cfg)
 
     display_name = f"{hf_name}/{hf_conf}" if hf_conf else hf_name
@@ -289,12 +440,16 @@ def load_examples(config: Dict) -> List[Dict]:
 
     examples: List[Dict] = []
     skipped_no_context = 0
+    skipped_empty_gold = 0
     for idx, ex in enumerate(ds):
         question = _extract_question(ex)
         contexts = extract_context_paragraphs(ex, dataset_name=dataset_name)
         gold_answer = _extract_gold_answer(ex)
         if not contexts:
             skipped_no_context += 1
+            continue
+        if drop_empty_gold and _is_empty_gold_answer(gold_answer):
+            skipped_empty_gold += 1
             continue
         examples.append(
             {
@@ -308,6 +463,8 @@ def load_examples(config: Dict) -> List[Dict]:
     print(f"[데이터] 사용 질문 수: {len(examples)}")
     if skipped_no_context > 0:
         print(f"[데이터] 문맥 추출 실패로 제외된 샘플 수: {skipped_no_context}")
+    if skipped_empty_gold > 0:
+        print(f"[데이터] 빈 정답 샘플 제외 수: {skipped_empty_gold}")
     if not examples:
         raise ValueError(
             "데이터셋에서 문맥을 추출한 샘플이 0개입니다. "
@@ -377,13 +534,25 @@ class RAGPipeline:
         self.k_reretrieve = int(retrieval_cfg.get("top_k_reretrieve", 6))
 
         print("[임베딩] 임베딩 모델 로딩/인코딩 중...")
+        retrieval_model_type = str(retrieval_cfg.get("model_type", "sentence_transformer")).strip().lower()
         self.embedder = LocalEmbedder(
             model_name=str(retrieval_cfg.get("embed_model", "intfloat/e5-small-v2")),
+            model_type=retrieval_model_type,
+            query_model_name=retrieval_cfg.get("query_model_name"),
+            corpus_model_name=retrieval_cfg.get("corpus_model_name"),
             device_preference=self.device_preference,
             batch_size=int(retrieval_cfg.get("batch_size", 32)),
             normalize_embeddings=bool(retrieval_cfg.get("normalize_embeddings", True)),
+            max_length=int(retrieval_cfg.get("max_length", 256)),
         )
         print(f"[장치] 임베딩 장치: {self.embedder.device}")
+        if retrieval_model_type == "dpr":
+            print(
+                "[임베딩] DPR 듀얼 인코더 사용: "
+                f"query={self.embedder.query_model_name}, corpus={self.embedder.corpus_model_name}"
+            )
+        else:
+            print(f"[임베딩] 임베딩 백엔드: {retrieval_model_type}")
 
         corpus_embeddings = self.embedder.encode_corpus([x["text"] for x in self.corpus])
 
@@ -404,6 +573,9 @@ class RAGPipeline:
             temperature=float(generator_cfg.get("temperature", 0.2)),
             do_sample=bool(generator_cfg.get("do_sample", False)),
             num_threads=generator_cfg.get("num_threads"),
+            torch_dtype=generator_cfg.get("torch_dtype"),
+            low_cpu_mem_usage=bool(generator_cfg.get("low_cpu_mem_usage", True)),
+            trust_remote_code=bool(generator_cfg.get("trust_remote_code", False)),
         )
         print(f"[장치] 생성 장치: {self.generator.device}")
 
@@ -412,7 +584,9 @@ class RAGPipeline:
         answerable_cfg = eval_cfg.get("answerable", {})
         self.answerable_mode = str(answerable_cfg.get("mode", "gold_containment")).strip().lower()
         self.answerable_entail_threshold = float(answerable_cfg.get("entail_prob_threshold", 0.6))
-        self.answerable_entail_model_name = str(answerable_cfg.get("entail_model_name", "roberta-base-mnli"))
+        self.answerable_entail_model_name = str(
+            answerable_cfg.get("entail_model_name", "cross-encoder/nli-distilroberta-base")
+        )
         self.answerable_entailment_checker: Optional[EntailmentChecker] = None
         if self.answerable_mode == "entailment":
             print(
@@ -451,6 +625,7 @@ class RAGPipeline:
                 min_coverage_ratio=float(
                     checker_overrides.get("min_coverage_ratio", heur_cfg.get("min_coverage_ratio", 0.5))
                 ),
+                variant=str(checker_overrides.get("variant", heur_cfg.get("variant", "h1"))),
             )
 
         elif checker_name == "autorater":
@@ -472,6 +647,9 @@ class RAGPipeline:
                     temperature=float(auto_cfg.get("temperature", 0.0)),
                     do_sample=bool(auto_cfg.get("do_sample", False)),
                     num_threads=self.config.get("generator", {}).get("num_threads"),
+                    torch_dtype=auto_cfg.get("torch_dtype"),
+                    low_cpu_mem_usage=bool(auto_cfg.get("low_cpu_mem_usage", True)),
+                    trust_remote_code=bool(auto_cfg.get("trust_remote_code", False)),
                 )
 
             prompt_path_cfg = str(auto_cfg.get("prompt_template", "templates/autorater_ko.txt"))
@@ -507,7 +685,12 @@ class RAGPipeline:
         elif checker_name == "entailment":
             ent_cfg = suff_cfg.get("entailment", {})
             checker = EntailmentChecker(
-                model_name=str(checker_overrides.get("model_name", ent_cfg.get("model_name", "roberta-base-mnli"))),
+                model_name=str(
+                    checker_overrides.get(
+                        "model_name",
+                        ent_cfg.get("model_name", "cross-encoder/nli-distilroberta-base"),
+                    )
+                ),
                 sufficient_if_entail_prob_ge=float(
                     checker_overrides.get(
                         "sufficient_if_entail_prob_ge",
@@ -594,6 +777,15 @@ class RAGPipeline:
     ) -> Dict:
         strategy_mode = str(strategy_mode).lower().strip()
         strategy_overrides = strategy_overrides or {}
+        k_reretrieve_second_raw = strategy_overrides.get("k_reretrieve_second", None)
+        k_reretrieve_second: Optional[int] = None
+        if k_reretrieve_second_raw not in (None, "", 0):
+            try:
+                parsed_k2 = int(k_reretrieve_second_raw)
+                if parsed_k2 > int(k_reretrieve):
+                    k_reretrieve_second = parsed_k2
+            except (TypeError, ValueError):
+                k_reretrieve_second = None
 
         initial_docs = self._retrieve(question, k_initial)
         initial_contexts = [d["text"] for d in initial_docs]
@@ -669,6 +861,162 @@ class RAGPipeline:
                 answer = raw_answer
                 strategy_used = f"uncertainty_generate({metric})"
 
+        elif strategy_mode in {"bm25_score_threshold", "retrieval_score_threshold_abstain"}:
+            # BM25 계열 점수 임계값 baseline.
+            # 현재 파이프라인이 dense/BM25를 모두 지원할 수 있으므로, top-k 점수로부터
+            # query-local confidence(softmax top1 prob)를 계산해 임계값과 비교한다.
+            bm25_cfg = self.config.get("strategy", {}).get("bm25_threshold", {})
+            th = float(strategy_overrides.get("threshold", bm25_cfg.get("threshold", 0.50)))
+            metric = str(strategy_overrides.get("score_metric", bm25_cfg.get("score_metric", "softmax_top1"))).strip().lower()
+            scores = np.array([float(s) for s in initial_scores], dtype=float)
+            if scores.size <= 0:
+                confidence = 0.0
+            else:
+                if metric == "sigmoid_max":
+                    confidence = float(1.0 / (1.0 + np.exp(-float(np.max(scores)))))
+                else:
+                    # default: softmax top1 probability
+                    shifted = scores - float(np.max(scores))
+                    exp_scores = np.exp(shifted)
+                    confidence = float(exp_scores[0] / max(1e-12, float(np.sum(exp_scores))))
+                    metric = "softmax_top1"
+
+            checker_score = float(max(0.0, min(1.0, confidence)))
+            checker_label = SUFFICIENT if checker_score >= th else INSUFFICIENT
+            checker_meta = {
+                "mode": "bm25_score_threshold",
+                "metric": metric,
+                "threshold": th,
+                "top1_score_raw": float(initial_scores[0]) if initial_scores else 0.0,
+                "topk_scores_raw": [float(x) for x in initial_scores],
+            }
+            if checker_label == INSUFFICIENT:
+                answer = self.abstain_text
+                strategy_used = "bm25_threshold_abstain"
+            else:
+                answer = self._generate_answer(question, final_docs)
+                strategy_used = "bm25_threshold_generate"
+
+        elif strategy_mode == "random_abstain":
+            random_cfg = self.config.get("strategy", {}).get("random_abstain", {})
+            rate = float(strategy_overrides.get("abstain_rate", random_cfg.get("abstain_rate", 0.1)))
+            rate = float(max(0.0, min(1.0, rate)))
+            # 재현성을 위해 질문과 시드를 이용한 deterministic pseudo-random score 사용
+            rnd = random.Random(f"{self.seed}::{question}").random()
+            checker_score = float(1.0 - rnd)
+            checker_label = INSUFFICIENT if rnd < rate else SUFFICIENT
+            checker_meta = {
+                "mode": "random_abstain",
+                "abstain_rate": rate,
+                "random_draw": float(rnd),
+            }
+            if checker_label == INSUFFICIENT:
+                answer = self.abstain_text
+                strategy_used = "random_abstain"
+            else:
+                answer = self._generate_answer(question, final_docs)
+                strategy_used = "random_generate"
+
+        elif strategy_mode == "flare_lite":
+            # FLARE 경량 근사: 저신뢰 생성 시 질의 확장 재검색 후 재생성
+            flare_cfg = dict(self.config.get("strategy", {}).get("flare", {}))
+            flare_cfg.update(strategy_overrides)
+            metric = str(flare_cfg.get("metric", "avg_token_prob")).strip().lower()
+            conf_th = float(flare_cfg.get("confidence_threshold", 0.35))
+            max_rounds = max(1, int(flare_cfg.get("max_rounds", 2)))
+            k_growth = max(1, int(flare_cfg.get("k_growth", 3)))
+            query_with_draft = bool(flare_cfg.get("query_with_draft", True))
+            abstain_on_low_conf = bool(flare_cfg.get("abstain_on_low_conf", False))
+
+            gen_cfg = self.config.get("generator", {})
+            round_metas: List[Dict] = []
+            current_docs = list(initial_docs)
+            current_question = str(question)
+
+            def _pick_confidence(out_dict: Dict, m: str) -> float:
+                if m == "entropy_confidence":
+                    return float(out_dict.get("entropy_confidence", 0.0))
+                if m == "avg_logprob":
+                    return float(max(0.0, min(1.0, np.exp(float(out_dict.get("avg_token_logprob", -20.0))))))
+                return float(out_dict.get("avg_token_prob", 0.0))
+
+            last_out: Dict = {"text": self.abstain_text}
+            last_conf = 0.0
+            used_rounds = 0
+            for round_idx in range(max_rounds):
+                used_rounds = round_idx + 1
+                current_contexts = [d["text"] for d in current_docs]
+                out = self.generator.generate_answer_with_uncertainty(
+                    question=current_question,
+                    contexts=current_contexts,
+                    abstain_text=self.abstain_text,
+                    prompt_style=self.prompt_style,
+                    max_new_tokens=int(gen_cfg.get("max_new_tokens", 32)),
+                    temperature=float(gen_cfg.get("temperature", 0.2)),
+                    do_sample=bool(gen_cfg.get("do_sample", False)),
+                )
+                conf = float(max(0.0, min(1.0, _pick_confidence(out, metric))))
+                last_out = out
+                last_conf = conf
+                round_metas.append(
+                    {
+                        "round": round_idx + 1,
+                        "k": len(current_docs),
+                        "confidence": conf,
+                        "metric": metric,
+                        "draft_answer": str(out.get("text", ""))[:160],
+                    }
+                )
+
+                # 충분히 신뢰되면 조기 종료
+                if conf >= conf_th:
+                    break
+
+                # 마지막 라운드면 더 이상 재검색하지 않음
+                if round_idx >= max_rounds - 1:
+                    break
+
+                next_k = int(k_reretrieve + (k_growth * round_idx))
+                next_k = max(next_k, int(k_reretrieve))
+                draft = str(out.get("text", "")).strip()
+                if query_with_draft and draft and draft != self.abstain_text:
+                    next_query = f"{question} {draft}"
+                else:
+                    next_query = str(question)
+                current_docs = self._retrieve(next_query, next_k)
+                current_question = str(question)
+
+            final_docs = current_docs
+            checker_score = float(last_conf)
+            checker_label = SUFFICIENT if checker_score >= conf_th else INSUFFICIENT
+            checker_meta = {
+                "mode": "flare_lite",
+                "metric": metric,
+                "confidence_threshold": conf_th,
+                "max_rounds": max_rounds,
+                "k_growth": k_growth,
+                "query_with_draft": query_with_draft,
+                "abstain_on_low_conf": abstain_on_low_conf,
+                "rounds_used": used_rounds,
+                "rounds": round_metas,
+            }
+            uncertainty_meta = {
+                "metric": metric,
+                "threshold": conf_th,
+                "avg_token_logprob": float(last_out.get("avg_token_logprob", -20.0)),
+                "avg_token_prob": float(last_out.get("avg_token_prob", 0.0)),
+                "avg_token_entropy": float(last_out.get("avg_token_entropy", 0.0)),
+                "entropy_confidence": float(last_out.get("entropy_confidence", 0.0)),
+                "token_count": int(last_out.get("token_count", 0)),
+            }
+
+            if checker_label == INSUFFICIENT and abstain_on_low_conf:
+                answer = self.abstain_text
+                strategy_used = "flare_lite_abstain"
+            else:
+                answer = str(last_out.get("text", self.abstain_text)).strip() or self.abstain_text
+                strategy_used = "flare_lite_generate"
+
         elif checker is None:
             # checker 없이 abstain/reretrieve/hybrid를 호출하면 baseline으로 간주
             answer = self._generate_answer(question, final_docs)
@@ -686,6 +1034,22 @@ class RAGPipeline:
             if checker_label == INSUFFICIENT:
                 final_docs = self._retrieve(question, k_reretrieve)
                 strategy_used = "reretrieve_generate"
+                stage_meta: Dict[str, Dict] = {"1차": checker_meta}
+                if checker is not None:
+                    label2, score2, meta2 = checker.predict(question, [d["text"] for d in final_docs])
+                    checker_label = label2
+                    checker_score = score2
+                    stage_meta["2차"] = meta2
+                    if label2 == INSUFFICIENT and k_reretrieve_second is not None:
+                        final_docs = self._retrieve(question, k_reretrieve_second)
+                        label3, score3, meta3 = checker.predict(question, [d["text"] for d in final_docs])
+                        checker_label = label3
+                        checker_score = score3
+                        stage_meta["3차"] = meta3
+                        strategy_used = "reretrieve2_generate"
+                    else:
+                        strategy_used = "reretrieve1_generate"
+                    checker_meta = stage_meta
             else:
                 strategy_used = "initial_generate"
             answer = self._generate_answer(question, final_docs)
@@ -694,20 +1058,29 @@ class RAGPipeline:
             if checker_label == INSUFFICIENT:
                 final_docs = self._retrieve(question, k_reretrieve)
                 label2, score2, meta2 = checker.predict(question, [d["text"] for d in final_docs])
+                stage_meta: Dict[str, Dict] = {"1차": checker_meta, "2차": meta2}
                 checker_label = label2
                 checker_score = score2
-                checker_meta = {"1차": checker_meta, "2차": meta2}
+                reretrieve_stage = "reretrieve1"
+                if label2 == INSUFFICIENT and k_reretrieve_second is not None:
+                    final_docs = self._retrieve(question, k_reretrieve_second)
+                    label3, score3, meta3 = checker.predict(question, [d["text"] for d in final_docs])
+                    checker_label = label3
+                    checker_score = score3
+                    stage_meta["3차"] = meta3
+                    reretrieve_stage = "reretrieve2"
+                checker_meta = stage_meta
                 hybrid_cfg = self.config.get("strategy", {}).get("hybrid", {})
                 reretrieve_then_abstain = bool(hybrid_cfg.get("reretrieve_then_abstain", True))
-                if label2 == INSUFFICIENT and reretrieve_then_abstain:
+                if checker_label == INSUFFICIENT and reretrieve_then_abstain:
                     answer = self.abstain_text
-                    strategy_used = "hybrid_reretrieve_abstain"
+                    strategy_used = f"hybrid_{reretrieve_stage}_abstain"
                 else:
                     answer = self._generate_answer(question, final_docs)
                     strategy_used = (
-                        "hybrid_reretrieve_generate"
-                        if label2 != INSUFFICIENT
-                        else "hybrid_reretrieve_generate_forced"
+                        f"hybrid_{reretrieve_stage}_generate"
+                        if checker_label != INSUFFICIENT
+                        else f"hybrid_{reretrieve_stage}_generate_forced"
                     )
             else:
                 answer = self._generate_answer(question, final_docs)
@@ -723,8 +1096,10 @@ class RAGPipeline:
             "strategy_used": strategy_used,
             "initial_retrieved_doc_ids": initial_doc_ids,
             "initial_retrieved_scores": initial_scores,
+            "initial_contexts": initial_contexts,
             "retrieved_doc_ids": [d["doc_id"] for d in final_docs],
             "retrieved_scores": [float(d["score"]) for d in final_docs],
+            "retrieved_contexts": [str(d.get("text", "")) for d in final_docs],
             "oracle_answerable": int(oracle_answerable),
             "oracle_answerable_meta": oracle_meta,
             "uncertainty_meta": uncertainty_meta,
@@ -747,6 +1122,12 @@ class RAGPipeline:
         effective_checker_name = checker_name
         if checker_name is None and strategy_mode == "uncertainty_abstain":
             effective_checker_name = "uncertainty_baseline"
+        if checker_name is None and strategy_mode in {"bm25_score_threshold", "retrieval_score_threshold_abstain"}:
+            effective_checker_name = "bm25_score_threshold"
+        if checker_name is None and strategy_mode == "random_abstain":
+            effective_checker_name = "random_abstain"
+        if checker_name is None and strategy_mode == "flare_lite":
+            effective_checker_name = "flare_lite"
         checker = self._build_checker(checker_name, checker_overrides)
 
         print(
@@ -778,12 +1159,14 @@ class RAGPipeline:
                 "gold_answer": sample["gold_answer"],
                 "initial_retrieved_doc_ids": out["initial_retrieved_doc_ids"],
                 "initial_retrieved_scores": out["initial_retrieved_scores"],
+                "initial_contexts": out.get("initial_contexts", []),
                 "initial_max_retrieval_score": max(out["initial_retrieved_scores"]) if out["initial_retrieved_scores"] else 0.0,
                 "initial_mean_retrieval_score": (
                     float(np.mean(out["initial_retrieved_scores"])) if out["initial_retrieved_scores"] else 0.0
                 ),
                 "retrieved_doc_ids": out["retrieved_doc_ids"],
                 "retrieved_scores": out["retrieved_scores"],
+                "retrieved_contexts": out.get("retrieved_contexts", []),
                 "checker_name": effective_checker_name or "none",
                 "checker_label": out["checker_label"],
                 "checker_score": out["checker_score"],

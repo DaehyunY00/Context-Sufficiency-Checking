@@ -60,7 +60,7 @@ sufficiency:
       - 5
   entailment:
     enabled: false
-    model_name: roberta-base-mnli
+    model_name: cross-encoder/nli-distilroberta-base
     sufficient_if_entail_prob_ge: 0.6
 strategy:
   mode: abstain
@@ -98,7 +98,7 @@ evaluation:
     hist_bins: 30
   answerable:
     mode: gold_containment
-    entail_model_name: roberta-base-mnli
+    entail_model_name: cross-encoder/nli-distilroberta-base
     entail_prob_threshold: 0.6
   bootstrap:
     enabled: true

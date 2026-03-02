@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--hotpot-prefix", type=str, default="ablations_v3")
     parser.add_argument("--two-wiki-prefix", type=str, default="two_wiki_heuristic_abstain")
-    parser.add_argument("--seeds", type=str, default="42,43,44")
+    parser.add_argument("--seeds", type=str, default="42,43,44,45,46,47,48,49,50,51")
     parser.add_argument("--config-hotpot", type=str, default=str(ROOT / "configs" / "default.yaml"))
     parser.add_argument("--config-2wiki", type=str, default=str(ROOT / "configs" / "2wiki.yaml"))
     return parser.parse_args()

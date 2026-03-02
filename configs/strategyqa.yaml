@@ -9,21 +9,21 @@ run:
   log_jsonl: true
 
 dataset:
-  name: "2wikimultihopqa"
-  hf_name: "scholarly-shadows-syndicate/2wikimultihopqa"
+  name: "strategyqa"
+  hf_name: "ChilleD/StrategyQA"
   hf_config: null
-  split: "validation"
+  split: "train"  # 미러별 split 다름: validation 없으면 train 사용
   max_questions: 300
   corpus_chunk:
     chunk_size: 300
     chunk_overlap: 50
 
 retrieval:
-  model_type: "sentence_transformer"  # sentence_transformer | dpr
+  model_type: "sentence_transformer"
   embed_model: "intfloat/e5-small-v2"
-  query_model_name: null              # model_type=dpr일 때 사용
-  corpus_model_name: null             # model_type=dpr일 때 사용
-  max_length: 256                     # model_type=dpr 토큰 길이
+  query_model_name: null
+  corpus_model_name: null
+  max_length: 256
   index_type: "faiss_cpu"
   top_k_initial: 3
   top_k_reretrieve: 6
@@ -116,7 +116,7 @@ evaluation:
     warmup_drop: 5
     hist_bins: 30
   answerable:
-    mode: "gold_containment"  # gold_containment | entailment
+    mode: "gold_containment"
     entail_model_name: "cross-encoder/nli-distilroberta-base"
     entail_prob_threshold: 0.6
   bootstrap:

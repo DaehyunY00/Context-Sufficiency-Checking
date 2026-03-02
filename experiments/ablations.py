@@ -4,6 +4,8 @@ import argparse
 from collections import Counter
 from pathlib import Path
 import re
+import random
+from argparse import SUPPRESS
 import sys
 from typing import Dict, List, Tuple
 
@@ -11,7 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from evaluation.evaluator import aggregate_seed_rows, make_markdown_table, save_markdown, save_summary_csv
+from evaluation.evaluator import (
+    aggregate_seed_rows,
+    make_markdown_table,
+    save_markdown,
+    save_summary_csv,
+    summarize_for_report,
+)
 from evaluation.metrics import bootstrap_mean_ci, paired_bootstrap_test
 from pipeline import RAGPipeline, load_config
 
@@ -25,14 +33,35 @@ def _parse_int_list(text: str) -> List[int]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ablation 실험 실행 (3-seed 통계/Calibration/ROC 포함)")
+    parser = argparse.ArgumentParser(description="Ablation 실험 실행 (다중 시드 통계/Calibration/ROC 포함)")
     parser.add_argument("--config", type=str, default=str(ROOT / "configs" / "default.yaml"))
     parser.add_argument("--max-questions", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--threshold-sweep", type=str, default="0.2,0.35,0.5,0.65")
     parser.add_argument("--k-sweep", type=str, default="3,5,7")
     parser.add_argument("--run-name", type=str, default="ablations_v3")
-    parser.add_argument("--seeds", type=str, default="42,43,44")
+    parser.add_argument("--seeds", type=str, default="42,43,44,45,46,47,48,49,50,51")
+    parser.add_argument(
+        "--checkers",
+        type=str,
+        default="heuristic,autorater,self_consistency",
+        help="실행할 checker 목록 (콤마 구분). 예: heuristic,self_consistency",
+    )
+    parser.add_argument(
+        "--skip-bm25-threshold-baseline",
+        action="store_true",
+        help="BM25/retrieval score threshold baseline 실행을 건너뜀",
+    )
+    # 하위호환: 과거 README/스크립트에서 사용하던 플래그를 허용한다.
+    parser.add_argument("--include-bm25-threshold-baseline", action="store_true", help=SUPPRESS)
+    parser.add_argument(
+        "--skip-random-matched-baseline",
+        action="store_true",
+        help="각 τ에서 heuristic과 동일 abstain rate random baseline 실행을 건너뜀",
+    )
+    # 하위호환: 과거 README/스크립트에서 사용하던 플래그를 허용한다.
+    parser.add_argument("--include-random-matched-baseline", action="store_true", help=SUPPRESS)
+    parser.add_argument("--random-baseline-seed-offset", type=int, default=10000)
     parser.add_argument("--autorater-preflight-samples", type=int, default=20)
     parser.add_argument("--autorater-min-parse-success", type=float, default=0.30)
     parser.add_argument("--autorater-force-run", action="store_true")
@@ -90,8 +119,15 @@ def _method_key(
     uncertainty_metric: str | None = None,
     sc_n: int | None = None,
 ) -> str:
+    checker_norm = str(checker or "").strip().lower()
     if checker is None and strategy == "baseline" and k is None:
         return "baseline"
+    if checker is None and strategy == "flare_lite":
+        return "flare_lite"
+    if checker_norm == "bm25_score_threshold" and th is not None:
+        return f"bm25_score_threshold_th={th:.2f}"
+    if checker_norm == "random_abstain" and th is not None:
+        return f"random_abstain_matched_th={th:.2f}"
     if strategy == "uncertainty_abstain":
         metric = str(uncertainty_metric or "avg_token_prob").strip().lower()
         return f"uncertainty_abstain_{metric}"
@@ -102,6 +138,47 @@ def _method_key(
     if th is not None:
         return f"heuristic_abstain_th={th:.2f}"
     return f"{checker}_{strategy}"
+
+
+def _simulate_random_matched_records(
+    baseline_records: List[Dict],
+    target_records: List[Dict],
+    abstain_text: str,
+    seed: int,
+) -> List[Dict]:
+    """baseline 응답에 대해 target abstain count를 동일하게 맞춘 random abstain 기록 생성."""
+    if not baseline_records:
+        return []
+    n = len(baseline_records)
+    target_abstain = int(sum(int(r.get("is_abstain", 0)) for r in target_records))
+    target_abstain = max(0, min(n, target_abstain))
+
+    idxs = list(range(n))
+    rng = random.Random(int(seed))
+    rng.shuffle(idxs)
+    abstain_set = set(idxs[:target_abstain])
+
+    out: List[Dict] = []
+    for i, src in enumerate(baseline_records):
+        rec = dict(src)
+        abstain = i in abstain_set
+        rec["checker_name"] = "random_abstain"
+        rec["checker_score"] = 0.0 if abstain else 1.0
+        rec["checker_label"] = "INSUFFICIENT" if abstain else "SUFFICIENT"
+        rec["checker_meta"] = {
+            "mode": "random_abstain_matched",
+            "target_abstain_count": target_abstain,
+            "target_abstain_rate": target_abstain / max(1, n),
+        }
+        rec["strategy_used"] = "random_abstain" if abstain else "random_keep"
+        rec["is_abstain"] = 1 if abstain else 0
+        if abstain:
+            rec["final_answer"] = abstain_text
+            rec["is_correct"] = 0
+            rec["em"] = 0.0
+            rec["f1"] = 0.0
+        out.append(rec)
+    return out
 
 
 def _run_seed(
@@ -159,6 +236,22 @@ def _run_seed(
         rows.append(row)
         records_by_key[key] = records
 
+    flare_cfg = config.get("strategy", {}).get("flare", {})
+    if bool(flare_cfg.get("enabled", True)):
+        run_name = f"{args.run_name}_seed{seed}_flare_lite"
+        row, records, _ = pipeline.run_experiment(
+            run_name=run_name,
+            strategy_mode="flare_lite",
+            checker_name=None,
+            baseline_records=baseline_records,
+        )
+        key = _method_key(checker=None, strategy="flare_lite")
+        row["전략"] = "flare_lite"
+        row["메서드키"] = key
+        row["시드"] = seed
+        rows.append(row)
+        records_by_key[key] = records
+
     for checker in checkers:
         for strategy in ["abstain", "reretrieve"]:
             run_name = f"{args.run_name}_seed{seed}_{checker}_{strategy}"
@@ -199,7 +292,9 @@ def _run_seed(
             rows.append(row)
             records_by_key[key] = records
 
-    for th in _parse_float_list(args.threshold_sweep):
+    threshold_values = _parse_float_list(args.threshold_sweep)
+    heuristic_by_threshold: Dict[float, List[Dict]] = {}
+    for th in threshold_values:
         run_name = f"{args.run_name}_seed{seed}_heuristic_th_{str(th).replace('.', '_')}"
         row, records, _ = pipeline.run_experiment(
             run_name=run_name,
@@ -214,6 +309,55 @@ def _run_seed(
         row["시드"] = seed
         rows.append(row)
         records_by_key[key] = records
+        heuristic_by_threshold[float(th)] = records
+
+        if not bool(args.skip_bm25_threshold_baseline):
+            bm_run_name = f"{args.run_name}_seed{seed}_bm25_score_th_{str(th).replace('.', '_')}"
+            bm_row, bm_records, _ = pipeline.run_experiment(
+                run_name=bm_run_name,
+                strategy_mode="retrieval_score_threshold_abstain",
+                checker_name=None,
+                strategy_overrides={"threshold": float(th), "score_metric": "softmax_top1"},
+                baseline_records=baseline_records,
+            )
+            bm_key = _method_key(checker="bm25_score_threshold", strategy="abstain", th=th)
+            bm_row["전략"] = f"bm25_score_threshold(th={th:.2f})"
+            bm_row["메서드키"] = bm_key
+            bm_row["시드"] = seed
+            rows.append(bm_row)
+            records_by_key[bm_key] = bm_records
+
+    if not bool(args.skip_random_matched_baseline):
+        for th in threshold_values:
+            target_records = heuristic_by_threshold.get(float(th), [])
+            if not target_records:
+                continue
+            random_seed = int(seed) + int(args.random_baseline_seed_offset) + int(round(float(th) * 1000))
+            sim_records = _simulate_random_matched_records(
+                baseline_records=baseline_records,
+                target_records=target_records,
+                abstain_text=pipeline.abstain_text,
+                seed=random_seed,
+            )
+            run_name = f"{args.run_name}_seed{seed}_random_match_th_{str(th).replace('.', '_')}"
+            temp_cfg = config.get("evaluation", {}).get("calibration", {}).get("temperature_scaling", {})
+            sim_row, _ = summarize_for_report(
+                records=sim_records,
+                run_name=run_name,
+                checker="random_abstain",
+                strategy=f"random_abstain_matched(th={th:.2f})",
+                abstain_text=pipeline.abstain_text,
+                calibration_bins=int(config.get("evaluation", {}).get("calibration_bins", 10)),
+                calibration_temperature_scaling=bool(temp_cfg.get("enabled", True)),
+                calibration_val_ratio=float(temp_cfg.get("validation_ratio", 0.3)),
+                calibration_seed=int(temp_cfg.get("seed", seed)),
+                calibration_min_samples=int(temp_cfg.get("min_samples", 50)),
+            )
+            rand_key = _method_key(checker="random_abstain", strategy="abstain", th=th)
+            sim_row["메서드키"] = rand_key
+            sim_row["시드"] = seed
+            rows.append(sim_row)
+            records_by_key[rand_key] = sim_records
 
     for k in _parse_int_list(args.k_sweep):
         run_name = f"{args.run_name}_seed{seed}_k_{k}"
@@ -324,6 +468,7 @@ def _build_retrieval_sufficiency_markdown(rows: List[Dict]) -> str:
 def _build_uncertainty_comparison_markdown(rows: List[Dict]) -> str:
     preferred_keys = {
         "baseline",
+        "flare_lite",
         "heuristic_abstain",
         "uncertainty_abstain_avg_token_prob",
         "uncertainty_abstain_entropy_confidence",
@@ -393,6 +538,7 @@ def _build_aurc_main_markdown(rows: List[Dict]) -> str:
     row_map = {str(r.get("메서드키", "")): r for r in rows}
     order = [
         "baseline",
+        "flare_lite",
         "heuristic_abstain",
         "self_consistency_abstain",
         "uncertainty_abstain_avg_token_prob",
@@ -443,6 +589,10 @@ def _dataset_display_name(dataset_name: str) -> str:
         return "2WikiMultiHopQA"
     if name in {"natural_questions", "nq"}:
         return "Natural Questions"
+    if name in {"musique", "musique_qa"}:
+        return "MuSiQue"
+    if name in {"strategyqa", "strategy_qa"}:
+        return "StrategyQA"
     return dataset_name or "Dataset"
 
 
@@ -471,6 +621,48 @@ def _build_tau_sweep_main_markdown(rows: List[Dict], threshold_list: List[float]
         lines.append(f"| {th:.2f} | {f1_txt} | {hall_txt} | {aurc_txt} |")
     if not has:
         return "τ sweep 결과가 없어 메인 표 생성을 생략했습니다."
+    return "\n".join(lines)
+
+
+def _build_threshold_baseline_markdown(rows: List[Dict], threshold_list: List[float], dataset_name: str) -> str:
+    ds = _dataset_display_name(dataset_name)
+    row_map = {str(r.get("메서드키", "")): r for r in rows}
+    lines = [
+        f"### Threshold 기반 Baseline 비교 ({ds})",
+        "",
+        "| 방법 | τ | F1 | Hallucination | Coverage | AURC |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+
+    def _append_row(method_name: str, key: str, th: float) -> bool:
+        row = row_map.get(key)
+        if row is None:
+            return False
+        f1 = _to_float(row.get("F1"))
+        hall = _to_float(row.get("환각률"))
+        cov = _to_float(row.get("커버리지"))
+        aurc = _to_float(row.get("AURC"))
+        f1_txt = f"{f1:.4f}" if f1 is not None else "-"
+        hall_txt = f"{hall:.4f}" if hall is not None else "-"
+        cov_txt = f"{cov:.4f}" if cov is not None else "-"
+        aurc_txt = f"{aurc:.4f}" if aurc is not None else "-"
+        lines.append(
+            f"| {method_name} | {th:.2f} | "
+            f"{f1_txt} | "
+            f"{hall_txt} | "
+            f"{cov_txt} | "
+            f"{aurc_txt} |"
+        )
+        return True
+
+    has_any = False
+    for th in sorted(set(float(x) for x in threshold_list)):
+        has_any = _append_row("Heuristic+Abstain", f"heuristic_abstain_th={th:.2f}", th) or has_any
+        has_any = _append_row("BM25ScoreThreshold", f"bm25_score_threshold_th={th:.2f}", th) or has_any
+        has_any = _append_row("RandomMatchedAbstain", f"random_abstain_matched_th={th:.2f}", th) or has_any
+
+    if not has_any:
+        return "threshold 기반 baseline 비교 대상이 없어 생략했습니다."
     return "\n".join(lines)
 
 
@@ -581,6 +773,7 @@ def _build_latency_device_markdown(
     row_map = {str(r.get("메서드키", "")): r for r in rows}
     key_order = [
         "baseline",
+        "flare_lite",
         "heuristic_abstain",
         "self_consistency_abstain",
         "uncertainty_abstain_avg_token_prob",
@@ -645,6 +838,39 @@ def _build_csc_accuracy_correlation_markdown(rows: List[Dict]) -> str:
             f"{float(row.get('CSC-정답상관_Pearsonr', 0.0)):.4f} | "
             f"{float(row.get('CSC-정답상관_Spearmanrho', 0.0)):.4f} |"
         )
+    return "\n".join(lines)
+
+
+def _build_hallucination_coverage_tradeoff_markdown(rows: List[Dict]) -> str:
+    row_map = {str(r.get("메서드키", "")): r for r in rows}
+    order = [
+        "baseline",
+        "flare_lite",
+        "heuristic_abstain",
+        "self_consistency_abstain",
+        "uncertainty_abstain_avg_token_prob",
+        "uncertainty_abstain_entropy_confidence",
+    ]
+    selected = [row_map[k] for k in order if k in row_map]
+    if not selected:
+        return "환각률-커버리지 trade-off 비교 대상이 없어 생략했습니다."
+
+    lines = [
+        "### Hallucination-Coverage Trade-off 비교",
+        "",
+        "| Method | F1 | Hallucination | Coverage | Latency(ms) |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in selected:
+        f1 = _to_float(row.get("F1"))
+        hall = _to_float(row.get("환각률"))
+        cov = _to_float(row.get("커버리지"))
+        lat = _to_float(row.get("지연시간(ms)"))
+        f1_txt = f"{f1:.4f}" if f1 is not None else "-"
+        hall_txt = f"{hall:.4f}" if hall is not None else "-"
+        cov_txt = f"{cov:.4f}" if cov is not None else "-"
+        lat_txt = f"{lat:.1f}" if lat is not None else "-"
+        lines.append(f"| {row.get('실험명','')} | {f1_txt} | {hall_txt} | {cov_txt} | {lat_txt} |")
     return "\n".join(lines)
 
 
@@ -723,6 +949,16 @@ def _build_policy_optimization_markdown(
 
 def main() -> None:
     args = parse_args()
+    # 기본값은 baseline 미실행(연산량 절감)이며, include 플래그로 활성화한다.
+    use_bm25_baseline = bool(getattr(args, "include_bm25_threshold_baseline", False))
+    use_random_baseline = bool(getattr(args, "include_random_matched_baseline", False))
+    if bool(args.skip_bm25_threshold_baseline):
+        use_bm25_baseline = False
+    if bool(args.skip_random_matched_baseline):
+        use_random_baseline = False
+    args.skip_bm25_threshold_baseline = not use_bm25_baseline
+    args.skip_random_matched_baseline = not use_random_baseline
+
     config = load_config(args.config)
     dataset_name = str(config.get("dataset", {}).get("name", "dataset"))
 
@@ -737,12 +973,14 @@ def main() -> None:
 
     seeds = _parse_int_list(args.seeds)
     if not seeds:
-        raise ValueError("--seeds는 최소 1개 이상 필요합니다. 예: --seeds 42,43,44")
+        raise ValueError("--seeds는 최소 1개 이상 필요합니다. 예: --seeds 42,43,44,45,46,47,48,49,50,51")
     print(f"[설정] 반복 시드: {seeds}")
 
-    checkers = ["heuristic", "autorater", "self_consistency"]
+    checkers = [c.strip() for c in str(args.checkers).split(",") if c.strip()]
+    if not checkers:
+        checkers = ["heuristic", "autorater", "self_consistency"]
     entailment_enabled = bool(config.get("sufficiency", {}).get("entailment", {}).get("enabled", False))
-    if entailment_enabled:
+    if entailment_enabled and "entailment" not in checkers:
         checkers.append("entailment")
 
     if "autorater" in checkers and int(args.autorater_preflight_samples) > 0:
@@ -844,6 +1082,11 @@ def main() -> None:
     save_markdown(corr_md, corr_md_path)
     print(f"[저장] CSC-정답 상관 분석: {corr_md_path}")
 
+    tradeoff_md = _build_hallucination_coverage_tradeoff_markdown(agg_rows)
+    tradeoff_md_path = output_dir / f"{args.run_name}_hallucination_coverage_tradeoff.md"
+    save_markdown(tradeoff_md, tradeoff_md_path)
+    print(f"[저장] 환각률-커버리지 비교표: {tradeoff_md_path}")
+
     tau_main_md = _build_tau_sweep_main_markdown(
         agg_rows,
         _parse_float_list(args.threshold_sweep),
@@ -852,6 +1095,15 @@ def main() -> None:
     tau_main_md_path = output_dir / f"{args.run_name}_tau_sweep_main.md"
     save_markdown(tau_main_md, tau_main_md_path)
     print(f"[저장] τ sweep 메인 비교표: {tau_main_md_path}")
+
+    threshold_baseline_md = _build_threshold_baseline_markdown(
+        agg_rows,
+        _parse_float_list(args.threshold_sweep),
+        dataset_name=dataset_name,
+    )
+    threshold_baseline_md_path = output_dir / f"{args.run_name}_threshold_baseline_comparison.md"
+    save_markdown(threshold_baseline_md, threshold_baseline_md_path)
+    print(f"[저장] threshold baseline 비교표: {threshold_baseline_md_path}")
 
     sc_stability_md = _build_self_consistency_stability_markdown(agg_rows, records_all)
     sc_stability_md_path = output_dir / f"{args.run_name}_self_consistency_stability.md"
@@ -879,14 +1131,16 @@ def main() -> None:
     save_markdown(policy_opt, policy_md_path)
     print(f"[저장] 정책 최적화 분석: {policy_md_path}")
 
-    print("\n[최종 결과] 3-seed 집계 한글 마크다운 표")
+    print(f"\n[최종 결과] {len(seeds)}-seed 집계 한글 마크다운 표")
     print(agg_md)
     print("\n" + calibration_md)
     print("\n" + aurc_main_md)
     print("\n" + retrieval_analysis)
     print("\n" + uncertainty_cmp)
     print("\n" + corr_md)
+    print("\n" + tradeoff_md)
     print("\n" + tau_main_md)
+    print("\n" + threshold_baseline_md)
     print("\n" + sc_stability_md)
     print("\n" + latency_md)
     print("\n" + policy_opt)

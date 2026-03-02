@@ -173,6 +173,87 @@ def extract_nq_context_paragraphs(example: Dict) -> List[Dict]:
     return paragraphs
 
 
+def extract_musique_context_paragraphs(example: Dict) -> List[Dict]:
+    """
+    MuSiQue 포맷에서 문맥 문단을 추출한다.
+    다양한 공개 미러 포맷을 고려해 paragraphs/context/evidence를 폭넓게 지원한다.
+    """
+    # 1) 대표 포맷: paragraphs: [{"title":..., "paragraph_text":...}, ...]
+    paragraphs_obj = example.get("paragraphs", None)
+    if isinstance(paragraphs_obj, list):
+        out: List[Dict] = []
+        for idx, item in enumerate(paragraphs_obj):
+            if isinstance(item, dict):
+                title = str(item.get("title", f"musique_{idx}")).strip() or f"musique_{idx}"
+                text = normalize_whitespace(
+                    item.get(
+                        "paragraph_text",
+                        item.get("paragraph", item.get("text", item.get("content", ""))),
+                    )
+                )
+            else:
+                title = f"musique_{idx}"
+                text = normalize_whitespace(item)
+            if text:
+                out.append({"title": title, "text": text})
+        if out:
+            return out
+
+    # 2) fallback: 일반 context 계열 키
+    for key in ["context", "contexts", "evidence", "passages", "documents"]:
+        if key in example:
+            paras = _extract_generic_context_paragraphs(example.get(key), default_title="musique")
+            if paras:
+                return paras
+    return []
+
+
+def extract_strategyqa_context_paragraphs(example: Dict) -> List[Dict]:
+    """
+    StrategyQA 포맷에서 문맥 문단을 추출한다.
+    facts/evidence를 우선 사용하고, 없으면 일반 context 키를 탐색한다.
+    """
+    out: List[Dict] = []
+
+    facts = example.get("facts", None)
+    if isinstance(facts, list):
+        for idx, fact in enumerate(facts):
+            if isinstance(fact, dict):
+                text = normalize_whitespace(
+                    fact.get("text", fact.get("fact", fact.get("content", fact.get("statement", ""))))
+                )
+                title = str(fact.get("title", f"strategyqa_fact_{idx}"))
+            elif isinstance(fact, list):
+                text = normalize_whitespace(" ".join([str(x) for x in fact]))
+                title = f"strategyqa_fact_{idx}"
+            else:
+                text = normalize_whitespace(fact)
+                title = f"strategyqa_fact_{idx}"
+            if text:
+                out.append({"title": title, "text": text})
+        if out:
+            return out
+
+    evidence = example.get("evidence", None)
+    if evidence is not None:
+        paras = _extract_generic_context_paragraphs(evidence, default_title="strategyqa_evidence")
+        if paras:
+            return paras
+
+    for key in ["context", "contexts", "paragraphs", "passages", "documents"]:
+        if key in example:
+            paras = _extract_generic_context_paragraphs(example.get(key), default_title="strategyqa")
+            if paras:
+                return paras
+
+    # 일부 미러는 supporting_facts 키를 사용한다.
+    if "supporting_facts" in example:
+        paras = _extract_generic_context_paragraphs(example.get("supporting_facts"), default_title="strategyqa_support")
+        if paras:
+            return paras
+    return []
+
+
 def extract_context_paragraphs(example: Dict, dataset_name: str) -> List[Dict]:
     name = str(dataset_name).lower().strip()
     if name in {"hotpotqa", "hotpot_qa"}:
@@ -181,6 +262,10 @@ def extract_context_paragraphs(example: Dict, dataset_name: str) -> List[Dict]:
         return extract_2wiki_context_paragraphs(example)
     if name in {"natural_questions", "nq", "naturalquestions"}:
         return extract_nq_context_paragraphs(example)
+    if name in {"musique", "musique_qa"}:
+        return extract_musique_context_paragraphs(example)
+    if name in {"strategyqa", "strategy_qa"}:
+        return extract_strategyqa_context_paragraphs(example)
 
     for key in ["context", "contexts", "documents", "paragraphs", "passages"]:
         if key in example:

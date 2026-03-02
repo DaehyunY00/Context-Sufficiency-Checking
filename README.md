@@ -124,6 +124,9 @@ python experiments/run_sufficiency.py \
 - `reretrieve`
 - `hybrid`
 - `uncertainty_abstain`
+- `retrieval_score_threshold_abstain` (`bm25_score_threshold` 별칭)
+- `random_abstain`
+- `flare_lite` (FLARE 경량 근사)
 
 불확실성 기반 abstention 예시:
 ```bash
@@ -144,6 +147,33 @@ python experiments/run_sufficiency.py \
   --uncertainty-metric entropy_confidence \
   --uncertainty-threshold 0.35 \
   --max-questions 500
+
+# retrieval score threshold 기반 abstain (BM25_score_threshold baseline)
+python experiments/run_sufficiency.py \
+  --config configs/default.yaml \
+  --run-name suff_bm25_threshold \
+  --strategy retrieval_score_threshold_abstain \
+  --bm25-threshold 0.50 \
+  --max-questions 500
+
+# random abstain baseline
+python experiments/run_sufficiency.py \
+  --config configs/default.yaml \
+  --run-name suff_random_abstain \
+  --strategy random_abstain \
+  --random-abstain-rate 0.10 \
+  --max-questions 500
+
+# FLARE-lite baseline
+python experiments/run_sufficiency.py \
+  --config configs/default.yaml \
+  --run-name suff_flare_lite \
+  --strategy flare_lite \
+  --flare-metric avg_token_prob \
+  --flare-confidence-threshold 0.35 \
+  --flare-max-rounds 2 \
+  --flare-k-growth 3 \
+  --max-questions 500
 ```
 
 ## 8) Ablation 실행
@@ -151,11 +181,15 @@ python experiments/run_sufficiency.py \
 python experiments/ablations.py \
   --config configs/default.yaml \
   --run-name ablations_v3 \
-  --seeds 42,43,44 \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
   --max-questions 500 \
   --threshold-sweep 0.2,0.35,0.5,0.65 \
-  --k-sweep 3,5,7
+  --k-sweep 3,5,7 \
+  --include-bm25-threshold-baseline \
+  --include-random-matched-baseline
 ```
+참고: `BM25_score_threshold`, `Random_matched_abstain` baseline은 기본값으로 비활성화되어 있으며 위 `--include-*` 플래그를 줄 때만 실행됩니다.
+
 
 autorater 사전점검(기본 활성화):
 - ablation 시작 시 `--autorater-preflight-samples` 개수(기본 20개)로 JSON 파싱 성공률을 먼저 확인
@@ -165,7 +199,7 @@ autorater 사전점검(기본 활성화):
 
 ## 9) CSC 확률 추정 분석(신규)
 `ablations.py`는 아래 분석을 자동 저장합니다.
-- `3-seed 반복`: 방법별 평균 ± 표준편차, CI
+- `다중 시드 반복`: 방법별 평균 ± 표준편차, CI
 - `통계 검정`: baseline 대비 paired permutation test 기반 p-value
 - `Calibration`: temperature scaling 전/후 reliability CSV/PNG, ECE/Brier(before/after), calibrated temperature
 - `ROC/PR`: AUROC/AUPRC + 곡선 CSV/PNG
@@ -178,6 +212,60 @@ autorater 사전점검(기본 활성화):
 - `Self-consistency 안정성`: `n=3 vs n=5` 비교(분산 감소 수치 포함)
 - `정책 최적화`: threshold `τ` sweep + 비용함수 기반 최적 `τ*` + bootstrap 95% CI
 - `지연 분석`: warm-up 제거 평균, P50/P95, 표준편차, latency histogram, CPU/MPS 분리 평균 + 95% CI
+
+### 9-1) 보조 실험 10-seed 확장 권장 실행
+```bash
+python experiments/ablations.py \
+  --config configs/default.yaml \
+  --run-name ablations_seed10_hotpot \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
+  --max-questions 120
+
+python experiments/ablations.py \
+  --config configs/2wiki.yaml \
+  --run-name ablations_seed10_2wiki \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
+  --max-questions 120
+```
+
+### 9-1-b) FLARE-lite vs CSC trade-off (3,000+ 샘플)
+```bash
+python experiments/run_flare_tradeoff.py \
+  --config configs/default.yaml \
+  --run-name flare_tradeoff_hotpot_3k_seed10 \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
+  --max-questions 3000
+```
+- 전체 dev set 실행: `--max-questions 0` (split 전체 사용)
+- 결과: `outputs/<run_name>_summary.csv`, `outputs/<run_name>_tradeoff.md`
+
+### 9-2) Gold Containment vs NLI 교차검증(부록용)
+```bash
+python experiments/run_answerable_crosscheck.py \
+  --config configs/default.yaml \
+  --run-name answerable_cross_hotpot \
+  --checker heuristic \
+  --strategy abstain \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
+  --max-questions 120 \
+  --entail-model cross-encoder/nli-distilroberta-base \
+  --entail-threshold 0.6
+```
+
+### 9-3) 리트리버 일반화 검증(e5 vs DPR vs ColBERT-근사)
+```bash
+python experiments/run_retriever_generalization.py \
+  --config configs/default.yaml \
+  --run-name retriever_generalization_hotpot \
+  --checker heuristic \
+  --strategy abstain \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
+  --max-questions 120
+```
+
+참고:
+- `DPR`은 dual-encoder(`facebook/dpr-question_encoder-single-nq-base`, `facebook/dpr-ctx_encoder-single-nq-base`)를 직접 지원합니다.
+- `ColBERT`는 현재 late-interaction 완전 구현이 아닌 임베딩 근사 경로(`sentence_transformer`)로 동작합니다.
 
 ## 10) 결과 저장 경로
 기본 출력 경로: `outputs`
@@ -195,6 +283,7 @@ autorater 사전점검(기본 활성화):
 - Self-consistency 안정성: `outputs/<run_name>_self_consistency_stability.md`
 - 지연 분석 요약표(CI 포함): `outputs/<run_name>_latency_device_ci.md`
 - CSC-정답 상관 분석: `outputs/<run_name>_csc_accuracy_correlation.md`
+- Hallucination-Coverage 비교표: `outputs/<run_name>_hallucination_coverage_tradeoff.md`
 - 정책 최적화 분석: `outputs/<run_name>_policy_optimization.md`
 - 체커 곡선/캘리브레이션: `outputs/진단곡선/*`
 - 지연 분석 산출물: `outputs/지연분석/*`
@@ -215,7 +304,9 @@ autorater 사전점검(기본 활성화):
 각 샘플은 아래 필드를 포함합니다.
 - `question_id`, `question`, `gold_answer`
 - `initial_retrieved_doc_ids`, `initial_retrieved_scores`
+- `initial_contexts`
 - `retrieved_doc_ids`, `retrieved_scores`
+- `retrieved_contexts`
 - `checker_name`, `checker_label`, `checker_score`
 - `estimated_answerable_prob`, `oracle_answerable`
 - `oracle_answerable_mode`, `oracle_answerable_score`, `oracle_answerable_matched_answer`
@@ -244,9 +335,13 @@ Colab GPU 확장 시 `generator.model_name`을 아래로 교체 가능:
 
 추가 지원: `2wikimultihopqa`
 추가 지원: `natural_questions`
+추가 지원: `musique`
+추가 지원: `strategyqa`
 
 빠른 실행용 예시 설정 파일: `configs/2wiki.yaml`
 빠른 실행용 예시 설정 파일: `configs/nq.yaml`
+빠른 실행용 예시 설정 파일: `configs/musique.yaml`
+빠른 실행용 예시 설정 파일: `configs/strategyqa.yaml`
 
 예시:
 ```yaml
@@ -266,8 +361,71 @@ dataset:
   hf_config: "default"
   split: "validation"
   max_questions: 300
+  drop_empty_gold_answers: true  # 권장: 정답 공백 샘플 제외
 ```
 
-## 14) Autorater 템플릿
+MuSiQue 예시:
+```yaml
+dataset:
+  name: "musique"
+  hf_name: "dgslibisey/MuSiQue"
+  split: "validation"
+  max_questions: 300
+```
+
+StrategyQA 예시:
+```yaml
+dataset:
+  name: "strategyqa"
+  hf_name: "ChilleD/StrategyQA"
+  split: "train"  # 미러별 split 차이 가능
+  max_questions: 300
+```
+
+## 14) Llama3-8B 10-seed 재실험
+Llama3-8B 설정 파일:
+- `configs/llama3_8b_hotpot.yaml`
+- `configs/llama3_8b_2wiki.yaml`
+- `configs/llama3_8b_musique.yaml`
+- `configs/llama3_8b_strategyqa.yaml`
+
+통합 실행(Hotpot/2Wiki/MuSiQue/StrategyQA + 10-seed):
+```bash
+python experiments/run_llama3_seed10_suite.py \
+  --run-prefix llama3_seed10 \
+  --seeds 42,43,44,45,46,47,48,49,50,51 \
+  --max-questions 3000 \
+  --include-bm25-threshold-baseline \
+  --include-random-matched-baseline \
+  --skip-answerable-crosscheck \
+  --skip-retriever-generalization \
+  --output-dir outputs
+```
+
+참고:
+- `meta-llama/Meta-Llama-3.1-8B-Instruct`는 접근 권한이 필요할 수 있습니다(`hf auth login`).
+- MPS 메모리가 부족하면 `max_questions`를 줄이거나 checkers를 `heuristic,self_consistency`로 제한하세요.
+
+## 15) gH1 편향 점검(gold_containment 연계성)
+1) 수동 검증 subset 생성(약 200개):
+```bash
+python experiments/build_manual_paraphrase_subset.py \
+  --jsonl outputs/llama3_seed10_hotpot_seed42_heuristic_abstain.jsonl \
+  --output-csv outputs/manual_paraphrase_subset.csv \
+  --sample-size 200
+```
+- 생성된 CSV의 `human_judgment` 컬럼을 사람이 `0/1`로 채웁니다.
+
+2) gH1 vs gH1' AUROC 비교:
+```bash
+python experiments/run_gh1_bias_check.py \
+  --jsonl outputs/llama3_seed10_hotpot_seed42_heuristic_abstain.jsonl \
+  --manual-csv outputs/manual_paraphrase_subset.csv \
+  --output-csv outputs/gh1_bias_check.csv \
+  --output-md outputs/gh1_bias_check.md
+```
+- `gH1' = overlap(q \\ a*, C_k)`로 계산되며, `gold_containment`와 `human_judgment` 라벨 각각에서 AUROC를 비교합니다.
+
+## 16) Autorater 템플릿
 `templates/autorater_ko.txt`를 그대로 사용하며, 코드에서 `{question}`, `{context}`만 치환합니다.
 파싱 실패 시 `INSUFFICIENT`로 폴백하며, 자동 재시도(`autorater.max_parse_retries`) 후에도 실패하면 JSONL의 `checker_meta`에 파싱오류를 기록합니다.
